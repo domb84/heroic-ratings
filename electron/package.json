@@ -1,0 +1,7 @@
+{
+  "name": "heroic-ratings",
+  "productName": "Heroic Ratings",
+  "version": "1.0.0",
+  "description": "Browse your Heroic library by rating",
+  "main": "main.js"
+}

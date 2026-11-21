@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heroic Ratings</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand">Heroic <b>Ratings</b></div>
+  <div class="chips">
+    <div class="chip" id="chipSort"><span class="btn x">X</span><span class="k">Sort</span><span id="sortLabel">Rating</span><span id="sortDir">▼</span></div>
+    <div class="chip" id="chipGenre"><span class="btn sh">LB</span><span class="k">Genre</span><span id="genreLabel">All</span><span class="btn sh">RB</span></div>
+    <div class="chip dim" id="chipFilters"></div>
+    <input id="search" type="search" placeholder="Search… (Steam+X for keyboard)" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="count" id="count"></div>
+</header>
+
+<div id="progress" hidden><div class="bar"><i id="progressBar"></i></div><span id="progressText"></span></div>
+
+<main>
+  <section id="list" tabindex="-1"></section>
+  <aside id="detail"></aside>
+</main>
+
+<footer>
+  <span><span class="btn a">A</span>Launch / Install</span>
+  <span><span class="btn b">B</span>Clear</span>
+  <span><span class="btn x">X</span>Sort</span>
+  <span><span class="btn y">Y</span>Genres</span>
+  <span><span class="btn sh">LB</span><span class="btn sh">RB</span>Genre</span>
+  <span><span class="btn sh">LT</span><span class="btn sh">RT</span>Page</span>
+  <span><span class="btn glyph" title="Menu button"><svg viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h10"/></svg></span>Menu</span>
+  <span><span class="btn glyph" title="View button"><svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="7.5" height="6" rx="1"/><rect x="6" y="7" width="7.5" height="6" rx="1"/></svg></span>Reverse</span>
+</footer>
+
+<div id="overlay" hidden><div class="modal" id="modal"></div></div>
+<div id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
