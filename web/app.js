@@ -5,17 +5,22 @@ const SORTS = [
   { key: "rating", label: "Rating", dir: -1, get: g => g.rating },
   { key: "percent", label: "% Positive", dir: -1, get: g => g.percent },
   { key: "reviews", label: "Popularity", dir: -1, get: g => g.reviews || null },
-  { key: "metascore", label: "Metascore", dir: -1, get: g => g.metascore },
+  { key: "metascore", label: "Critic score", dir: -1, get: g => g.critic_score ?? g.metascore },   // Metascore, else IGDB critics
   { key: "year", label: "Release year", dir: -1, get: g => g.year },
   { key: "title", label: "Title", dir: 1, get: g => g.title.toLowerCase() },
 ];
 const STORES = ["All", "Epic", "GOG", "Amazon", "Other"];
-const PHASE_TEXT = { starting: "Reading Heroic library…", matching: "Matching titles on Steam", wikidata: "Looking up the rest on Wikidata", ratings: "Fetching Steam reviews" };
+const PHASE_TEXT = { starting: "Reading Heroic library…", matching: "Matching titles on Steam", wikidata: "Looking up the rest on Wikidata", ratings: "Fetching Steam reviews", igdb: "IGDB" };
+// IGDB play styles (game modes) and perspectives, for the filters. Only with an IGDB (Twitch) key.
+const STYLES = { "Any": null, "Single player": "Single player", "Co-op": "Co-operative", "Split screen": "Split screen",
+                 "Multiplayer": "Multiplayer", "MMO": "Massively Multiplayer Online (MMO)", "Battle royale": "Battle Royale" };
+const PERSPECTIVES = { "Any": null, "First person": "First person", "Third person": "Third person",
+                       "Isometric / top-down": "Bird view / Isometric", "Side view": "Side view", "VR": "Virtual Reality", "Text": "Text" };
 
 // ---------------------------------------------------------------- state
 const S = {
   games: [], view: [], sel: 0, version: -1, progress: {},
-  sortIdx: 0, dir: -1, genre: null, store: "All", installedOnly: false, hideUnrated: false, query: "",
+  sortIdx: 0, dir: -1, genre: null, store: "All", installedOnly: false, hideUnrated: false, style: "Any", persp: "Any", query: "",
   modal: null,
 };
 const $ = id => document.getElementById(id);
@@ -24,14 +29,16 @@ const els = { list: $("list"), detail: $("detail"), search: $("search"), overlay
 function loadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem("hr-prefs") || "{}");
-    for (const k of ["sortIdx", "dir", "genre", "store", "installedOnly", "hideUnrated"]) if (k in p) S[k] = p[k];
+    for (const k of ["sortIdx", "dir", "genre", "store", "installedOnly", "hideUnrated", "style", "persp"]) if (k in p) S[k] = p[k];
+    if (!(S.style in STYLES)) S.style = "Any";
+    if (!(S.persp in PERSPECTIVES)) S.persp = "Any";
     if (!SORTS[S.sortIdx]) S.sortIdx = 0;
   } catch (e) { /* storage unavailable */ }
 }
 function savePrefs() {
   try {
-    const { sortIdx, dir, genre, store, installedOnly, hideUnrated } = S;
-    localStorage.setItem("hr-prefs", JSON.stringify({ sortIdx, dir, genre, store, installedOnly, hideUnrated }));
+    const { sortIdx, dir, genre, store, installedOnly, hideUnrated, style, persp } = S;
+    localStorage.setItem("hr-prefs", JSON.stringify({ sortIdx, dir, genre, store, installedOnly, hideUnrated, style, persp }));
   } catch (e) { /* ignore */ }
 }
 
@@ -52,8 +59,17 @@ function img(url, w) {
 // What to show in the score slot: Steam user %, else a critic score, else why it's unrated.
 function scoreParts(g) {
   if (g.percent != null) return { big: g.percent + "%", cls: scoreClass(g.percent), label: g.label };
-  if (g.critic != null) return { big: String(g.critic), cls: scoreClass(g.critic), label: "Critics · " + g.critic_by };
+  if (g.critic != null) return { big: String(g.critic), cls: scoreClass(g.critic), label: critLabel(g) };
+  const ig = igdbScore(g);
+  if (ig) return ig;
   return { big: "—", cls: "c-na", label: unratedReason(g) };
+}
+// The chosen critic score's source and review count, e.g. "Critics · OpenCritic · 33".
+const critLabel = g => `Critics · ${g.critic_by}${g.critic_n ? " · " + g.critic_n : ""}`;
+// Last resort for games with no Steam reviews and no critic score: IGDB's user rating.
+function igdbScore(g) {
+  if (g.rating_src === "igdb-user") return { big: String(g.igdb.user), cls: scoreClass(g.igdb.user), label: `IGDB users · ${g.igdb.user_n}` };
+  return null;
 }
 
 function unratedReason(g) {
@@ -78,7 +94,9 @@ function buildView(keepId) {
     (!S.genre || g.genres.includes(S.genre) || g.tags.includes(S.genre)) &&
     (S.store === "All" || g.store === S.store) &&
     (!S.installedOnly || g.installed) &&
-    (!S.hideUnrated || g.percent != null || g.critic != null) &&
+    (!S.hideUnrated || g.rating != null || g.percent != null) &&
+    (!STYLES[S.style] || (g.modes || []).includes(STYLES[S.style])) &&
+    (!PERSPECTIVES[S.persp] || (g.persp || []).includes(PERSPECTIVES[S.persp])) &&
     (!q || norm(g.title).includes(q) || norm(g.steam_name || "").includes(q)));
   v.sort((a, b) => {
     const x = sort.get(a), y = sort.get(b);
@@ -121,8 +139,18 @@ function rowHTML(g) {
   return `<div class="row" data-id="${esc(g.id)}">
     ${g.art ? `<img loading="lazy" decoding="async" src="${esc(img(g.art, 120))}" alt="">` : '<div class="noimg"></div>'}
     <div class="t"><div class="name">${esc(g.title)}</div><div class="sub">${sub}</div></div>
+    ${lengthHTML(g)}
     <div class="score"></div>
   </div>`;
+}
+
+// How long to beat (IGDB): "29h", "4½h", "190h".
+const fmtHours = n => n == null ? "—" : n >= 100 ? Math.round(n) + "h" : n < 1 ? Math.max(1, Math.round(n * 60)) + "m"
+  : (Math.round(n * 2) / 2).toString().replace(".5", "½") + "h";
+function lengthHTML(g) {
+  const t = g.length;
+  if (!t || t.main == null) return `<div class="len none"><div class="t">—</div><div class="lbl">${t ? "no main time" : "no data"}</div></div>`;
+  return `<div class="len"><div class="t">${fmtHours(t.main)}</div><div class="lbl">main story</div></div>`;
 }
 
 // The one value shown in the list: whatever the current sort orders by.
@@ -136,14 +164,16 @@ function sortValue(g) {
     case "reviews":
       if (g.reviews) return { big: fmtN(g.reviews), cls: "c-plain", label: g.reviews === 1 ? "review" : "reviews" };
       return none(g.critic != null ? "No Steam reviews" : unratedReason(g));
-    case "metascore":
-      return g.metascore ? { big: String(g.metascore), cls: mcScoreClass(g.metascore), label: "Metascore" } : none("No Metascore");
+    case "metascore": {
+      const c = g.critic_score ?? g.metascore;
+      return c ? { big: String(c), cls: mcScoreClass(c), label: g.critic_src || "Metascore" } : none("No critic score");
+    }
     case "year":
       return g.year ? { big: String(g.year), cls: "c-plain", label: "Released" } : none("Release date unknown");
     default: // Rating (and Title, which has no number of its own)
       if (g.percent != null && g.rating != null) return { big: Math.round(g.rating), cls: scoreClass(g.rating), label: g.label };
-      if (g.critic != null) return { big: String(g.critic), cls: scoreClass(g.critic), label: "Critics · " + g.critic_by };
-      return none(unratedReason(g));
+      if (g.critic != null) return { big: String(g.critic), cls: scoreClass(g.critic), label: critLabel(g) };
+      return igdbScore(g) || none(unratedReason(g));
   }
 }
 function rowScoreHTML(g) {
@@ -160,6 +190,8 @@ function renderAll() {
   if (S.store !== "All") f.push(S.store);
   if (S.installedOnly) f.push("Installed");
   if (S.hideUnrated) f.push("Rated only");
+  if (S.style !== "Any") f.push(S.style);
+  if (S.persp !== "Any") f.push(S.persp);
   $("chipFilters").textContent = f.join(" · ");
   $("count").textContent = `${S.view.length} / ${S.games.length} games`;
 
@@ -201,20 +233,68 @@ function renderDetail(g) {
   els.detail.innerHTML = `
     ${g.art ? `<img class="cover" src="${esc(img(g.art, 480))}" alt="">` : ""}
     <h2>${esc(g.title)}</h2>
-    <div class="matched">${g.appid ? (showSteamName ? "Steam match: " + esc(g.steam_name) : "Steam app " + g.appid) + (g.via === "wikidata" ? " (found via Wikidata)" : "") + (g.override ? " (manual)" : "") : g.critic != null ? "Not on Steam" : esc(unratedReason(g))}</div>
+    <div class="matched">${g.appid ? (showSteamName ? "Steam match: " + esc(g.steam_name) : "Steam app " + g.appid) + (g.via === "wikidata" ? " (found via Wikidata)" : g.via === "igdb" ? " (found via IGDB)" : "") + (g.override ? " (manual)" : "") : g.critic != null ? "Not on Steam" : esc(unratedReason(g))}</div>
     <div class="bigscore">
       <div><div class="pct ${sc.cls}">${sc.big}</div></div>
       <div><div class="lbl ${sc.cls}">${esc(sc.label)}</div>
         <div class="n">${g.reviews ? g.reviews.toLocaleString() + " Steam reviews" : p == null && g.critic != null ? "Critic average out of 100" : ""}</div>
         <div class="n">${p != null && g.rating != null ? "Weighted rating " + g.rating.toFixed(1) : ""}</div>
-        <div class="n">${p != null && g.critic != null ? `Critics: ${g.critic} (${esc(g.critic_by)})` : ""}</div></div>
+        <div class="n">${p != null && g.critic != null ? `Critics: ${g.critic} (${esc(g.critic_by)}${g.critic_n ? `, ${g.critic_n} reviews` : ""})` : ""}</div></div>
       ${g.metascore ? `<div class="meta ${mcClass(g.metascore)}" title="Metascore">${g.metascore}</div>` : ""}
     </div>
     <div class="facts">${g.year ? `Released <b>${g.year}</b>` : ""}${g.year && g.devs?.length ? " · " : ""}${g.devs?.length ? `<b>${esc(g.devs.slice(0, 2).join(", "))}</b>` : ""}</div>
+    ${!document.body.classList.contains("lengths") || !g.length && !g.igdb ? "" : `<div class="hl-title">How long to beat <span>· IGDB</span></div>
+    ${g.length ? `<div class="hl-box"><div><b>${fmtHours(g.length.main)}</b><small>Main story</small></div><div><b>${fmtHours(g.length.extra)}</b><small>Main + extras</small></div><div><b>${fmtHours(g.length.comp)}</b><small>Completionist</small></div></div>`
+             : `<div class="hl-box"><div><small>No time on IGDB</small></div></div>`}`}
+    ${igdbDetailHTML(g)}
     <div class="tags">${genres.map(t => `<span class="tag g">${esc(t)}</span>`).join("")}${others.map(t => `<span class="tag">${esc(t)}</span>`).join("")}</div>
     ${g.desc ? `<p>${esc(g.desc)}</p>` : ""}
     <div class="state">${downloadText(g, true) ? `<span class="dl">${esc(downloadText(g, true))}</span>` : g.installed ? '<span class="inst">● Installed</span>' : "Not installed"} · ${esc(g.store)}</div>`;
 }
+
+// IGDB extras in the details panel: its scores, play styles, multiplayer, series, similar games.
+function mpText(mp) {
+  const parts = [];
+  if (mp.campaigncoop) parts.push("Co-op campaign");
+  if (mp.offlinecoopmax) parts.push(`Local co-op up to ${mp.offlinecoopmax}`); else if (mp.offlinecoop) parts.push("Local co-op");
+  if (mp.onlinecoopmax) parts.push(`Online co-op up to ${mp.onlinecoopmax}`); else if (mp.onlinecoop) parts.push("Online co-op");
+  if (mp.splitscreen) parts.push("Split screen");
+  if (mp.lancoop) parts.push("LAN co-op");
+  if (mp.onlinemax && !mp.onlinecoopmax) parts.push(`Online up to ${mp.onlinemax}`);
+  return parts.join(" · ");
+}
+function gameLinks(ids) {
+  return ids.map(id => S.games.find(x => x.id === id)).filter(Boolean)
+    .map(x => `<span class="glink" data-id="${esc(x.id)}">${esc(x.title)}</span>`).join("");
+}
+function igdbDetailHTML(g) {
+  const ig = g.igdb;
+  if (!ig) return "";
+  const scores = [ig.critic ? `critics <b>${ig.critic}</b> <small>(${ig.critic_n} review${ig.critic_n === 1 ? "" : "s"})</small>` : "",
+                  ig.user ? `users <b>${ig.user}</b> <small>(${ig.user_n.toLocaleString()} rating${ig.user_n === 1 ? "" : "s"})</small>` : ""].filter(Boolean);
+  const style = [...(g.modes || []).map(m => m.replace("Massively Multiplayer Online (MMO)", "MMO").replace("Co-operative", "Co-op")),
+                 ...(g.persp || []).map(p => p.replace("Bird view / Isometric", "Isometric"))];
+  const mp = mpText(ig.mp || {});
+  const series = ig.same_series?.length ? gameLinks(ig.same_series) : "";
+  const similar = ig.similar?.length ? gameLinks(ig.similar) : "";
+  return `
+    ${scores.length ? `<div class="ig-line">IGDB: ${scores.join(" · ")}</div>` : ""}
+    ${style.length ? `<div class="ig-line">${esc(style.join(" · "))}</div>` : ""}
+    ${mp ? `<div class="ig-line">${esc(mp)}</div>` : ""}
+    ${series ? `<div class="hl-title">Same series in your library${ig.series[0] ? ` <span>· ${esc(ig.series[0])}</span>` : ""}</div><div class="glinks">${series}</div>` : ""}
+    ${similar ? `<div class="hl-title">More like this in your library</div><div class="glinks">${similar}</div>` : ""}`;
+}
+els.detail.addEventListener("click", e => {
+  const l = e.target.closest(".glink");
+  if (!l) return;
+  let i = S.view.findIndex(g => g.id === l.dataset.id);
+  if (i < 0) {   // filtered out: clear filters so it can be shown
+    S.query = ""; els.search.value = ""; S.genre = null; S.store = "All"; S.installedOnly = false; S.hideUnrated = false;
+    S.style = "Any"; S.persp = "Any"; savePrefs(); buildView(l.dataset.id);
+    i = S.view.findIndex(g => g.id === l.dataset.id);
+  }
+  select(i);
+});
 
 // ---------------------------------------------------------------- data
 async function api(path, body) {
@@ -227,6 +307,7 @@ async function loadGames() {
   const keep = S.view[S.sel]?.id;
   S.games = d.games;
   S.steamDeck = !!d.steam_deck;
+  document.body.classList.toggle("lengths", !!d.lengths);   // length column only with an IGDB key
   if (!layoutChecked) { layoutChecked = true; if (d.desktop_layout) showLayoutWarn(true); }
   S.version = d.version;
   showProgress(d.progress);
@@ -368,6 +449,10 @@ function openMenu() {
       { label: "Store", value: S.store, change: d => { S.store = cycle(storesPresent, S.store, d); refilter(); } },
       { label: "Installed only", value: S.installedOnly ? "On" : "Off", change: () => { S.installedOnly = !S.installedOnly; refilter(); } },
       { label: "Hide unrated games", value: S.hideUnrated ? "On" : "Off", change: () => { S.hideUnrated = !S.hideUnrated; refilter(); } },
+      ...(document.body.classList.contains("lengths") ? [
+        { label: "Play style", value: S.style, change: d => { S.style = cycle(Object.keys(STYLES), S.style, d); refilter(); } },
+        { label: "Perspective", value: S.persp, change: d => { S.persp = cycle(Object.keys(PERSPECTIVES), S.persp, d); refilter(); } },
+      ] : []),
       { label: "Search…", activate: () => { closeModal(); focusSearch(); } },
       { label: "Controller test", activate: () => { closeModal(); openDiag(); } },
       ...(g && g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
@@ -649,6 +734,9 @@ function heroicProblem(code, what, extra, g) {
     "no-shortcut": `${title} isn't in Steam, so this app won't launch it (it would close when this app closes).
       <div class="note">In Heroic, open the game and choose <b>Add to Steam</b>, then restart Steam.</div>`,
     "steam-not-running": `Steam isn't running. Start Steam, then try again.`,
+    "heroic-busy": `Heroic is still busy (downloading or uninstalling), so ${title} can't be launched yet.
+      <div class="note">Launching closes the Heroic this app runs in the background, which would stop that. Try again when it's finished.</div>`,
+    "heroic-not-stopped": `The Heroic this app runs in the background didn't close, so ${title} wasn't launched. Try again.`,
   }[code];
   openModal({ kind: "confirm", yes: "OK", onYes: () => {},
     html: msg || `Couldn't ${what} <span class="note">(${esc(code || "unknown")})</span>.<div class="note">${extra}</div>` });
@@ -701,8 +789,9 @@ function input(a) {
     case "end": select(S.view.length - 1); break;
     case "a": launchSelected(); break;
     case "b":
-      if (S.query || S.genre || S.store !== "All" || S.installedOnly || S.hideUnrated) {
+      if (S.query || S.genre || S.store !== "All" || S.installedOnly || S.hideUnrated || S.style !== "Any" || S.persp !== "Any") {
         S.query = ""; els.search.value = ""; S.genre = null; S.store = "All"; S.installedOnly = false; S.hideUnrated = false;
+        S.style = "Any"; S.persp = "Any";
         savePrefs(); buildView(S.view[S.sel]?.id); toast("Filters cleared");
       } else select(0);
       break;

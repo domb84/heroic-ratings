@@ -4,8 +4,9 @@ Browse your Heroic Games Launcher library (Epic, GOG and Amazon games, plus side
 
 - **Ratings come from Steam, for free and with no API key.** Each game is matched to its Steam page. The app shows the Steam user-review score, a weighted rating (SteamDB-style, so a game with 5 reviews at 100% doesn't beat one with 500k reviews at 96%), and the Metascore.
 - **Wikidata covers the gaps, also free with no API key.** Steam's search only finds games that are currently for sale. For any game it misses, the app asks Wikidata, which finds delisted Steam games (old Football Managers, Rocket League) so they still get their Steam reviews. For games not on Steam at all (Fortnite, Alan Wake 2), Wikidata supplies the Metacritic or OpenCritic critic score, shown as "Critics · OpenCritic".
+- **IGDB extras** (with a free Twitch developer key): better matching, critic scores for more games, how long to beat, play-style and perspective filters, and same-series / similar games from your library.
 - **Genre filter** uses Steam's genre tags.
-- **Sort** by weighted rating, % positive, popularity, Metascore, release year or title. The list shows the value you're sorting by; the details panel shows them all.
+- **Sort** by weighted rating, % positive, popularity, critic score, release year or title. The list shows the value you're sorting by; the details panel shows them all.
 - **Filters** for store, installed only, and hiding unrated games.
 - **Launch** installed games straight from the list, through Steam, so a game keeps running when you close this app.
 - **Self-contained:** the app runs in its own window and brings its own Python, so it doesn't need a browser or the system Python. Everything, including your cache, lives in this folder.
@@ -73,6 +74,26 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 
 To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, and `/` for search. Mouse and touch also work.
 
+## IGDB (optional, with a Twitch key)
+
+With a free **Twitch developer key**, the app also uses **IGDB** to fill the gaps Steam leaves. Steam stays the main source wherever it has data.
+
+- **Better matching:** games Steam's search misses are looked up on IGDB, including its alternative names; when IGDB knows the game's Steam page, the game gets its full Steam reviews (on one library this linked 9 more games, e.g. *Trine 4: Definitive Edition* → *Trine 4: The Nightmare Prince*).
+- **Critic score:** the Metascore where Steam has one. Otherwise IGDB's critic score, unless it's based on fewer than 3 reviews or Wikidata's OpenCritic score is based on more reviews, in which case OpenCritic's is used. **Sort → Critic score** uses it, and the source and review count are shown (e.g. "OpenCritic · 33 reviews").
+- **Scores for unrated games:** the same critic score choice, or failing that IGDB's user rating. IGDB scores based on fewer than 3 critic reviews or 5 user ratings aren't used; they still show (with their counts) in the details panel.
+- **How long to beat:** main story length next to the rating, and all three times in the details panel. IGDB has times for roughly 40% of games.
+- **Play style and perspective filters** (Menu): single player, co-op, split screen, multiplayer…; first person, third person, isometric, side view…
+- **In the details panel:** IGDB's scores with review counts, play styles, multiplayer details (e.g. "Local co-op up to 4"), **same series in your library** and **more like this in your library** (tap a name to jump to it).
+- **Games not on Steam** get IGDB's cover, description, release year, developer and genres.
+
+Create an application at [dev.twitch.tv/console](https://dev.twitch.tv/console) (OAuth redirect URL: `http://localhost`, client type: Confidential), then put its client ID and secret in `twitch.json` in the data folder (`~/.local/share/heroic-ratings/` for the AppImage):
+
+```json
+{ "client_id": "…", "client_secret": "…" }
+```
+
+or set `HEROIC_RATINGS_TWITCH_CLIENT_ID` and `HEROIC_RATINGS_TWITCH_CLIENT_SECRET`. IGDB data is fetched on the next sync (restart the app, or choose **Menu → Refresh**) and takes seconds; it's refreshed monthly.
+
 ## Launching games
 
 Press **A** on an installed game and confirm. The app launches it **only through the game's own Steam shortcut** (Heroic adds one when it installs a game), so the game runs as its own Steam app and keeps running when you close this app. If that isn't possible, the app says why instead of launching:
@@ -137,6 +158,7 @@ python3 heroic_ratings.py [--port 8787] [--heroic-dir PATH] [--kiosk] [--no-sync
 | `HEROIC_RATINGS_DATA` | Where the cache is stored (default `./data`; the AppImage uses `~/.local/share/heroic-ratings`) |
 | `HEROIC_RATINGS_BROWSER` | Browser command for `--kiosk` |
 | `HEROIC_LAUNCH_CMD` | Custom launch command; `{url}` is replaced with the `heroic://launch?...` URL (installs then use the plain `heroic://launch` prompt too) |
+| `HEROIC_RATINGS_TWITCH_CLIENT_ID`, `HEROIC_RATINGS_TWITCH_CLIENT_SECRET` | Twitch developer app for IGDB game lengths (or use `twitch.json`) |
 | `HEROIC_RATINGS_STEAM_USERDATA` | Steam `userdata` folder to use for the shortcut (for testing) |
 
 The app finds the Heroic folder automatically for both the Flatpak install (`~/.var/app/com.heroicgameslauncher.hgl/config/heroic`) and the native one (`~/.config/heroic`).

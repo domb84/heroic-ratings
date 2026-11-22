@@ -76,6 +76,20 @@ GENRE_TAGS = [
     "Psychological Horror", "Action-Adventure",
 ]
 GENRE_SET = set(GENRE_TAGS)
+# IGDB scores based on very few reviews (median: 4 critics) aren't comparable with a
+# Metascore or a Steam percentage, so they only count from these review counts up.
+IGDB_MIN_CRITICS = 3
+IGDB_MIN_USERS = 5
+IGDB_GENRES = {
+    "Role-playing (RPG)": "RPG", "Shooter": "Shooter", "Platform": "Platformer", "Puzzle": "Puzzle",
+    "Racing": "Racing", "Sport": "Sports", "Fighting": "Fighting", "Strategy": "Strategy",
+    "Real Time Strategy (RTS)": "RTS", "Turn-based strategy (TBS)": "Turn-Based Strategy",
+    "Tactical": "Turn-Based Tactics", "Adventure": "Adventure", "Indie": "Indie", "Arcade": "Arcade",
+    "Simulator": "Simulation", "Visual Novel": "Visual Novel", "Point-and-click": "Point & Click",
+    "Card & Board Game": "Card Game", "Hack and slash/Beat 'em up": "Hack and Slash", "MOBA": "MOBA",
+    "Music": "Rhythm", "Action": "Action", "Horror": "Horror", "Survival": "Survival", "Open world": "Open World",
+    "Stealth": "Stealth", "Sandbox": "Sandbox",
+}
 
 UA = "heroic-ratings/1.0 (local library tool)"
 
@@ -404,12 +418,172 @@ def _wd_qualifier_ids(claim, prop):
             for q in (claim.get("qualifiers") or {}).get(prop, [])}
 
 
+def _wd_review_count(claim) -> int | None:
+    """The "number of reviews" (P7887) qualifier of a review score, if any."""
+    for snak in (claim.get("qualifiers") or {}).get("P7887", []):
+        v = (snak.get("datavalue") or {}).get("value")
+        try:
+            return int(float(v["amount"])) if isinstance(v, dict) else None
+        except (KeyError, ValueError, TypeError):
+            return None
+    return None
+
+
 def _parse_score(v) -> int | None:
     m = re.fullmatch(r"\s*([\d.]+)\s*/\s*(100|10)\s*", str(v or ""))
     if not m:
         return None
     x = float(m.group(1)) * 100 / int(m.group(2))
     return round(x) if 0 < x <= 100 else None
+
+
+# ------------------------------------------------------------------- game lengths
+#
+# IGDB, which needs a free Twitch developer app (client ID + secret). It fills gaps
+# Steam leaves: critic and user scores, play styles and perspectives, series, similar
+# games, multiplayer details, how long to beat, and covers/summaries/genres for games
+# that aren't on Steam. Steam stays the main source wherever it has data.
+
+IGDB_REFRESH_SECS = 30 * 86400
+IGDB_MISS_RETRY_SECS = 14 * 86400
+
+
+class IGDB:
+    """IGDB's time-to-beat data (needs a free Twitch developer app: client ID + secret).
+    Games are found by their Steam app ID, or by name when there's no Steam match."""
+    API = "https://api.igdb.com/v4/"
+    TOKEN_URL = "https://id.twitch.tv/oauth2/token"
+
+    def __init__(self, client_id: str, client_secret: str):
+        self.client_id, self.client_secret = client_id, client_secret
+        self.token, self.token_expires = None, 0.0
+        self.last = 0.0
+        self.source_field = "external_game_source"   # newer name; older API used "category"
+
+    def _get_token(self):
+        q = urllib.parse.urlencode({"client_id": self.client_id, "client_secret": self.client_secret,
+                                    "grant_type": "client_credentials"})
+        with urllib.request.urlopen(urllib.request.Request(f"{self.TOKEN_URL}?{q}", data=b"", method="POST"),
+                                    timeout=30) as r:
+            j = json.load(r)
+        self.token, self.token_expires = j["access_token"], time.time() + j.get("expires_in", 3600) - 300
+
+    def query(self, endpoint: str, body: str) -> list:
+        for attempt in range(2):
+            if not self.token or time.time() > self.token_expires:
+                self._get_token()
+            wait = self.last + 0.3 - time.monotonic()      # IGDB allows 4 requests per second
+            if wait > 0:
+                time.sleep(wait)
+            self.last = time.monotonic()
+            req = urllib.request.Request(self.API + endpoint, data=body.encode(), method="POST", headers={
+                "Client-ID": self.client_id, "Authorization": f"Bearer {self.token}", "Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt == 0:
+                    self.token = None
+                    continue
+                raise
+        return []
+
+    def steam_to_igdb(self, appids: list[int]) -> dict[int, int]:
+        """{Steam app ID: IGDB game ID} for up to 500 app IDs."""
+        uids = ",".join(f'"{a}"' for a in appids)
+        try:
+            ext = self.query("external_games", f"fields game,uid; where uid = ({uids}) & {self.source_field} = 1; limit 500;")
+        except urllib.error.HTTPError as e:
+            if e.code != 400 or self.source_field == "category":
+                raise
+            self.source_field = "category"   # older API: Steam is category 1
+            ext = self.query("external_games", f"fields game,uid; where uid = ({uids}) & category = 1; limit 500;")
+        return {int(r["uid"]): r["game"] for r in ext if str(r.get("uid", "")).isdigit() and r.get("game")}
+
+    def igdb_to_steam(self, game_ids: list[int]) -> dict[int, int]:
+        """{IGDB game ID: Steam app ID} for games IGDB knows a Steam page of."""
+        if not game_ids:
+            return {}
+        ext = self.query("external_games", f"fields game,uid; where game = ({','.join(map(str, game_ids))}) "
+                                           f"& {self.source_field} = 1; limit 500;")
+        return {r["game"]: int(r["uid"]) for r in ext if str(r.get("uid", "")).isdigit() and r.get("game")}
+
+    def search_name(self, title: str) -> tuple[int, str, float] | None:
+        """Best IGDB match for a title (also checks IGDB's alternative names): (id, name, score)."""
+        best, best_sc = None, 0.0
+        for q in search_queries(title)[:2]:
+            safe = q.replace('"', " ")
+            for r in self.query("games", f'search "{safe}"; fields id,name,alternative_names.name; limit 10;'):
+                names = [r.get("name", "")] + [a.get("name", "") for a in r.get("alternative_names") or []]
+                sc = max(max(similarity(title, n), similarity(q, n)) for n in names if n) if any(names) else 0
+                if sc > best_sc:
+                    best, best_sc = r, sc
+            if best_sc >= MATCH_THRESHOLD:
+                break
+        if not best or best_sc < MATCH_THRESHOLD:
+            return None
+        return best["id"], best.get("name", ""), round(best_sc, 3)
+
+    DETAIL_FIELDS = ("name,rating,rating_count,aggregated_rating,aggregated_rating_count,game_modes.name,"
+                     "player_perspectives.name,collections.name,franchises.name,similar_games,summary,cover.image_id,"
+                     "first_release_date,genres.name,themes.name,involved_companies.developer,"
+                     "involved_companies.company.name,multiplayer_modes.campaigncoop,multiplayer_modes.lancoop,"
+                     "multiplayer_modes.offlinecoop,multiplayer_modes.offlinecoopmax,multiplayer_modes.offlinemax,"
+                     "multiplayer_modes.onlinecoop,multiplayer_modes.onlinecoopmax,multiplayer_modes.onlinemax,"
+                     "multiplayer_modes.splitscreen")
+
+    def details(self, game_ids: list[int]) -> dict[int, dict]:
+        """Everything the app uses about up to 500 games, including time to beat."""
+        if not game_ids:
+            return {}
+        idl = ",".join(map(str, game_ids))
+        rows = self.query("games", f"fields {self.DETAIL_FIELDS}; where id = ({idl}); limit 500;")
+        ttb = {r["game_id"]: r for r in self.query(
+            "game_time_to_beats", f"fields game_id,hastily,normally,completely; where game_id = ({idl}); limit 500;")
+            if r.get("game_id")}
+        names = lambda xs: [x["name"] for x in xs or [] if isinstance(x, dict) and x.get("name")]
+        # 999h-style values are placeholders for endless games, not real lengths
+        hrs = lambda v: round(v / 3600, 1) if v and v < 900 * 3600 else None
+        out = {}
+        for r in rows:
+            mp = {}
+            for m in r.get("multiplayer_modes") or []:
+                for k, v in m.items():
+                    if k == "id" or not v:
+                        continue
+                    mp[k] = max(mp.get(k, 0), v) if isinstance(v, int) and not isinstance(v, bool) else True
+            t = ttb.get(r["id"], {})
+            cover = (r.get("cover") or {}).get("image_id")
+            rel = r.get("first_release_date")
+            out[r["id"]] = {
+                "id": r["id"], "name": r.get("name", ""),
+                "user": round(r["rating"]) if r.get("rating") else None, "user_n": r.get("rating_count") or 0,
+                "critic": round(r["aggregated_rating"]) if r.get("aggregated_rating") else None,
+                "critic_n": r.get("aggregated_rating_count") or 0,
+                "modes": names(r.get("game_modes")), "persp": names(r.get("player_perspectives")),
+                "series": names(r.get("collections")) or names(r.get("franchises")),
+                "similar": [x for x in r.get("similar_games") or [] if isinstance(x, int)],
+                "summary": r.get("summary", ""),
+                "cover": f"https://images.igdb.com/igdb/image/upload/t_cover_big/{cover}.jpg" if cover else None,
+                "year": time.gmtime(rel).tm_year if rel else None,
+                "devs": [c["company"]["name"] for c in r.get("involved_companies") or []
+                         if c.get("developer") and (c.get("company") or {}).get("name")],
+                "genres": names(r.get("genres")), "themes": names(r.get("themes")), "mp": mp,
+                "main": hrs(t.get("hastily")), "extra": hrs(t.get("normally")), "comp": hrs(t.get("completely")),
+            }
+        return out
+
+
+def twitch_credentials() -> tuple[str, str] | None:
+    """Twitch developer app credentials for IGDB, from the environment or data/twitch.json."""
+    cid, secret = os.environ.get("HEROIC_RATINGS_TWITCH_CLIENT_ID"), os.environ.get("HEROIC_RATINGS_TWITCH_CLIENT_SECRET")
+    if not (cid and secret):
+        try:
+            j = json.loads((DATA_DIR / "twitch.json").read_text())
+            cid, secret = j.get("client_id"), j.get("client_secret")
+        except (OSError, ValueError):
+            return None
+    return (cid.strip(), secret.strip()) if cid and secret else None
 
 
 class Wikidata:
@@ -453,7 +627,7 @@ class Wikidata:
             return None
         sim, qid, name, claims = best
         steam = [int(v) for c in claims.get("P1733", []) if str(v := _wd_value(c)).isdigit()]
-        critics = {}  # source -> (score, priority); prefer PC scores, then platform-less ones
+        critics = {}  # source -> (score, priority, review count); prefer PC scores, then platform-less ones
         for c in claims.get("P444", []):
             score = _parse_score(_wd_value(c))
             src = next((WD_CRITICS[b] for b in _wd_qualifier_ids(c, "P447") if b in WD_CRITICS), None)
@@ -462,8 +636,11 @@ class Wikidata:
             plats = _wd_qualifier_ids(c, "P400")
             prio = 0 if plats & WD_PC else 1 if not plats else 2
             if src not in critics or prio < critics[src][1]:
-                critics[src] = (score, prio)
-        critic = next(({"score": critics[s][0], "by": s} for s in ("Metacritic", "OpenCritic") if s in critics), None)
+                critics[src] = (score, prio, _wd_review_count(c))
+        # OpenCritic first: Wikidata records its review count. (A Wikidata Metacritic score is
+        # used as the Metascore when Steam has none, below.)
+        critic = next(({"score": critics[s][0], "by": s, "n": critics[s][2]} for s in ("OpenCritic", "Metacritic")
+                       if s in critics), None)
         return {"qid": qid, "name": name, "sim": round(sim, 3), "steam": steam[0] if steam else None,
                 "critic": critic, "metacritic": critics["Metacritic"][0] if "Metacritic" in critics else None}
 
@@ -576,7 +753,7 @@ class State:
             self._lib_sig = sig
             return
         # While a sync runs, leave the old signature so the change is picked up afterwards.
-        if sig == prev or self.progress.get("phase") in ("starting", "matching", "wikidata", "ratings"):
+        if sig == prev or self.progress.get("phase") in ("starting", "matching", "wikidata", "igdb", "ratings"):
             return
         self._lib_sig = sig
         log("Heroic library changed on disk, reloading")
@@ -631,7 +808,12 @@ class State:
         wd_todo = [g for g in self.games
                    if (m := matches.get(g["id"])) and not m.get("appid") and not m.get("override")
                    and not EXTRA_RE.search(g["title"])
-                   and (force or now - m.get("wd_t", 0) > NOMATCH_RETRY_SECS)]
+                   and (force or now - m.get("wd_t", 0) > NOMATCH_RETRY_SECS
+                        or (m.get("critic") and "n" not in m["critic"]))]
+        # (critic scores saved before review counts were kept are re-checked once, however the
+        # game was matched)
+        wd_todo += [g for g in self.games if (m := matches.get(g["id"])) and not m.get("override")
+                    and m.get("critic") and "n" not in m["critic"] and g not in wd_todo]
         for i, g in enumerate(wd_todo):
             self.set_progress("wikidata", i, len(wd_todo), g["title"])
             try:
@@ -650,6 +832,10 @@ class State:
             if i % 10 == 9:
                 self.save()
         self.save()
+
+        # 1c. IGDB (with a Twitch key): find each game there; a game Steam search missed
+        # gets its Steam page from IGDB when IGDB knows it (also via alternative names).
+        self.sync_igdb_map(now, force)
 
         # 2. tag names
         if force or not self.cache["tags"] or now - self.cache.get("tags_t", 0) > TAGLIST_REFRESH_SECS:
@@ -700,7 +886,82 @@ class State:
             self.save()
         with self.lock:
             self.version += 1
+
+        # 4. IGDB details: scores, play styles, series, similar games, lengths, covers…
+        self.sync_igdb_details(now, force)
         self.set_progress("done", len(self.games), len(self.games))
+
+    def sync_igdb_map(self, now: float, force: bool):
+        creds = twitch_credentials()
+        if not creds:
+            return
+        igdb = IGDB(*creds)
+        imap = self.cache.setdefault("igdb_map", {})
+        matches = self.cache["matches"]
+
+        def stale(g):
+            e, m = imap.get(g["id"]), matches.get(g["id"]) or {}
+            if force or not e or e.get("appid") != m.get("appid"):
+                return True
+            return now - e.get("t", 0) > (IGDB_MISS_RETRY_SECS if not e.get("id") else IGDB_REFRESH_SECS)
+
+        todo = [g for g in self.games if not EXTRA_RE.search(g["title"]) and stale(g)]
+        if not todo:
+            return
+        try:
+            with_appid = [g for g in todo if (matches.get(g["id"]) or {}).get("appid")]
+            for i in range(0, len(with_appid), 200):
+                batch = with_appid[i:i + 200]
+                self.set_progress("igdb", i, len(todo), "Matching on IGDB")
+                found = igdb.steam_to_igdb([matches[g["id"]]["appid"] for g in batch])
+                for g in batch:
+                    a = matches[g["id"]]["appid"]
+                    imap[g["id"]] = {"id": found.get(a), "appid": a, "t": now}
+            rest = [g for g in todo if g not in with_appid]
+            for k, g in enumerate(rest):
+                self.set_progress("igdb", len(with_appid) + k, len(todo), g["title"])
+                r = igdb.search_name(g["title"])
+                imap[g["id"]] = {"id": r[0] if r else None, "appid": None, "t": now,
+                                 "name": r[1] if r else "", "score": r[2] if r else 0}
+            # Steam pages for games Steam search missed, from IGDB's own links
+            want = {imap[g["id"]]["id"]: g for g in rest
+                    if imap[g["id"]]["id"] and not (matches.get(g["id"]) or {}).get("override")}
+            ids = list(want)
+            for i in range(0, len(ids), 200):
+                for gid_igdb, appid in igdb.igdb_to_steam(ids[i:i + 200]).items():
+                    g = want[gid_igdb]
+                    m = matches.setdefault(g["id"], {"title": g["title"]})
+                    m.update({"appid": appid, "name": imap[g["id"]]["name"], "score": imap[g["id"]]["score"], "via": "igdb"})
+                    imap[g["id"]]["appid"] = appid
+                    log("IGDB linked", g["title"], "to Steam app", appid)
+        except Exception as e:   # optional source: keep what we have, try again next sync
+            log("IGDB matching failed:", repr(e))
+        self.save()
+
+    def sync_igdb_details(self, now: float, force: bool):
+        creds = twitch_credentials()
+        if not creds:
+            return
+        imap, details = self.cache.get("igdb_map", {}), self.cache.setdefault("igdb", {})
+        ids = sorted({e["id"] for e in imap.values() if e.get("id")})
+        stale = [i for i in ids if force or str(i) not in details
+                 or now - details[str(i)].get("t", 0) > IGDB_REFRESH_SECS]
+        if not stale:
+            return
+        igdb = IGDB(*creds)
+        try:
+            for i in range(0, len(stale), 200):
+                batch = stale[i:i + 200]
+                self.set_progress("igdb", i, len(stale), "Fetching IGDB details")
+                got = igdb.details(batch)
+                for gid_igdb in batch:
+                    details[str(gid_igdb)] = {**got.get(gid_igdb, {"id": gid_igdb, "missing": True}), "t": now}
+                self.save()
+        except Exception as e:
+            log("IGDB details failed:", repr(e))
+        self.save()
+        with self.lock:
+            self.version += 1
 
     def worker(self):
         while True:
@@ -735,11 +996,8 @@ class State:
             })
             if not out["steam_name"]:
                 out["steam_name"] = s.get("name", "")
-        crit = m.get("critic")
-        if crit:
-            out["critic"], out["critic_by"] = crit["score"], crit["by"]
-            if out.get("rating") is None:  # no Steam user reviews: rank by the critic score
-                out["rating"] = float(crit["score"])
+        ig = self._add_igdb(g, out)
+        self._pick_critic(out, m.get("critic"), ig)
         out["via"] = m.get("via")
         out["extra"] = bool(EXTRA_RE.search(g["title"]))
         if not out.get("art") and appid:
@@ -748,7 +1006,82 @@ class State:
         out.setdefault("tags", [])
         return out
 
+    def _add_igdb(self, g: dict, out: dict):
+        """IGDB data for one game: fills gaps only, Steam stays first."""
+        e = self.cache.get("igdb_map", {}).get(g["id"]) or {}
+        ig = self.cache.get("igdb", {}).get(str(e.get("id"))) if e.get("id") else None
+        if not ig or ig.get("missing"):
+            return None
+        idx = getattr(self, "_igdb_index", {})
+        mine = lambda ids: [x for i in ids for x in idx.get("by_id", {}).get(i, []) if x != g["id"]]
+        out["igdb"] = {
+            "name": ig.get("name"), "user": ig.get("user"), "user_n": ig.get("user_n"),
+            "critic": ig.get("critic"), "critic_n": ig.get("critic_n"), "mp": ig.get("mp") or {},
+            "series": ig.get("series") or [],
+            "same_series": sorted({x for s_ in ig.get("series") or [] for x in idx.get("by_series", {}).get(s_, []) if x != g["id"]}),
+            "similar": mine(ig.get("similar") or [])[:8],
+        }
+        out["modes"] = ig.get("modes") or []
+        out["persp"] = ig.get("persp") or []
+        if ig.get("main") or ig.get("extra") or ig.get("comp"):
+            out["length"] = {"main": ig.get("main"), "extra": ig.get("extra"), "comp": ig.get("comp"), "src": "igdb"}
+        # games without Steam data: fill the blanks from IGDB
+        if not out.get("desc"):
+            out["desc"] = ig.get("summary", "")
+        if not out.get("year"):
+            out["year"] = ig.get("year")
+        if not out.get("devs"):
+            out["devs"] = ig.get("devs") or []
+        if not out.get("genres"):
+            out["genres"] = [IGDB_GENRES[x] for x in (ig.get("genres") or []) + (ig.get("themes") or []) if x in IGDB_GENRES][:8]
+            out["tags"] = list(dict.fromkeys(out["genres"] + (ig.get("themes") or [])))[:12]
+        if not out.get("art") and ig.get("cover") and not out.get("appid"):   # Steam's art first
+            out["art"] = ig["cover"]
+        return ig
+
+    @staticmethod
+    def _pick_critic(out: dict, wd: dict | None, ig: dict | None):
+        """Choose the critic score (IGDB vs Wikidata's OpenCritic/Metacritic) and fill the
+        Critic score sort and, for games without Steam reviews, the main rating.
+
+        IGDB wins unless its score is thin (under IGDB_MIN_CRITICS reviews) or Wikidata's
+        is backed by more reviews. A Metascore still comes first for the Critic score sort.
+        """
+        ig_c = {"score": ig["critic"], "by": "IGDB", "n": ig.get("critic_n") or 0} if ig and ig.get("critic") else None
+        wd_c = {"score": wd["score"], "by": wd["by"], "n": wd.get("n")} if wd else None
+        ig_ok = bool(ig_c) and ig_c["n"] >= IGDB_MIN_CRITICS
+        if ig_ok and not (wd_c and (wd_c["n"] or 0) > ig_c["n"]):
+            best = ig_c
+        else:
+            best = wd_c
+        if best:
+            out["critic"], out["critic_by"], out["critic_n"] = best["score"], best["by"], best["n"]
+        if out.get("metascore"):
+            out["critic_score"], out["critic_src"] = out["metascore"], "Metascore"
+        elif best:
+            out["critic_score"] = best["score"]
+            out["critic_src"] = best["by"] + (f" · {best['n']} reviews" if best["n"] else "")
+        if out.get("rating") is None and out.get("percent") is None:   # no Steam reviews
+            if best:
+                out["rating"], out["rating_src"] = float(best["score"]), "critic"
+            elif ig and ig.get("user") and (ig.get("user_n") or 0) >= IGDB_MIN_USERS:
+                out["rating"], out["rating_src"] = float(ig["user"]), "igdb-user"
+
+    def _build_igdb_index(self):
+        """Which library games each IGDB ID and series belongs to (for "similar"/"same series")."""
+        imap, det = self.cache.get("igdb_map", {}), self.cache.get("igdb", {})
+        by_id, by_series = {}, {}
+        for g in self.games:
+            i = (imap.get(g["id"]) or {}).get("id")
+            if not i:
+                continue
+            by_id.setdefault(i, []).append(g["id"])
+            for s_ in (det.get(str(i)) or {}).get("series") or []:
+                by_series.setdefault(s_, []).append(g["id"])
+        self._igdb_index = {"by_id": by_id, "by_series": by_series}
+
     def snapshot(self) -> dict:
+        self._build_igdb_index()
         with self.lock:
             return {
                 "version": self.version,
@@ -756,6 +1089,7 @@ class State:
                 "heroic_dir": str(self.heroic) if self.heroic else None,
                 "steam_deck": STEAM_DECK,
                 "desktop_layout": DESKTOP_LAYOUT,
+                "lengths": bool(twitch_credentials()),   # IGDB data (lengths, play styles…) only with a Twitch key
                 "games": [self.game_view(g) for g in self.games],
             }
 
@@ -908,13 +1242,33 @@ def heroic_debug_command() -> list[str]:
     raise OSError("Heroic isn't installed (neither the Flatpak nor a 'heroic' command was found)")
 
 
-def steam_start_time() -> float | None:
-    """When the running Steam client started (epoch seconds), or None if it isn't running."""
+STEAM_PID_FILE = Path(os.environ.get("HEROIC_RATINGS_STEAM_PID", HOME / ".steam/steam.pid"))
+
+
+def _process_start(pid: int) -> float | None:
+    """Start time of a process (epoch seconds) from /proc, or None."""
     try:
         btime = next(float(l.split()[1]) for l in open("/proc/stat") if l.startswith("btime"))
-        tick = os.sysconf("SC_CLK_TCK")
-    except (OSError, StopIteration, ValueError):
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return btime + int(stat.rsplit(")", 1)[1].split()[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, StopIteration, ValueError, IndexError):
         return None
+
+
+def steam_start_time() -> float | None:
+    """When the running Steam client started (epoch seconds), or None if it isn't running.
+
+    Steam writes its PID to ~/.steam/steam.pid each time it starts, so that names the
+    current client. (Taking the oldest process called "steam" was wrong: in Game Mode a
+    session process with that name outlives "Restart Steam".)
+    """
+    try:
+        pid = int(STEAM_PID_FILE.read_text().strip())
+        if Path(f"/proc/{pid}").exists():
+            return _process_start(pid) or STEAM_PID_FILE.stat().st_mtime
+    except (OSError, ValueError):
+        pass
+    # Fallback: the newest Steam client process (its binary lives in .../ubuntu12_32/steam).
     starts = []
     for d in Path("/proc").iterdir():
         if not d.name.isdigit():
@@ -922,11 +1276,14 @@ def steam_start_time() -> float | None:
         try:
             if (d / "comm").read_text().strip() != "steam":
                 continue
-            stat = (d / "stat").read_text()
-            starts.append(btime + int(stat.rsplit(")", 1)[1].split()[19]) / tick)
-        except (OSError, ValueError, IndexError):
+            if not os.readlink(d / "exe").endswith("/ubuntu12_32/steam"):
+                continue
+        except OSError:
             continue
-    return min(starts) if starts else None
+        t = _process_start(int(d.name))
+        if t:
+            starts.append(t)
+    return max(starts) if starts else None
 
 
 def _load_shortcut_state() -> dict:
@@ -1114,8 +1471,9 @@ def _cdp_eval(ws_url: str, expr: str, timeout: float = 20):
 
 
 
-def heroic_running() -> bool:
-    """Is Heroic already running (Flatpak or native)?"""
+def _heroic_processes() -> list[tuple[int, bytes]]:
+    """(pid, command line) of Heroic's main process(es), Flatpak or native."""
+    out = []
     for d in Path("/proc").iterdir():
         if not d.name.isdigit():
             continue
@@ -1126,8 +1484,42 @@ def heroic_running() -> bool:
         if (HEROIC_FLATPAK_ID.encode() in cmd and b"flatpak run" not in cmd) or b"/heroic/heroic" in cmd \
                 or cmd.startswith(b"heroic "):
             if b"--type=" not in cmd:   # skip Chromium helper processes
-                return True
-    return False
+                out.append((int(d.name), cmd))
+    return out
+
+
+def heroic_running() -> bool:
+    return bool(_heroic_processes())
+
+
+def stop_our_heroic(heroic_dir: Path | None, wait: float = 10) -> dict:
+    """Close the hidden Heroic this app started, so that a game's Steam shortcut starts a
+    fresh Heroic belonging to Steam. (Otherwise the shortcut hands the launch to our
+    Heroic, and the game runs inside this app.) Refuses while it's downloading or
+    uninstalling something. Returns {} or {"error": "heroic-busy", "busy": [...]}."""
+    d = heroic_downloads(heroic_dir)
+    if d.get("running"):
+        busy = [q["runner"] + ":" + q["appName"] for q in d.get("queue", [])] + \
+               [u["runner"] + ":" + u["appName"] for u in d.get("uninstalling", [])]
+        if busy:
+            return {"error": "heroic-busy", "busy": busy}
+    ours = [pid for pid, cmd in _heroic_processes() if b"--remote-debugging-port" in cmd]
+    if not ours:
+        return {}
+    log("closing our hidden Heroic before launching through Steam:", ours)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in ours:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.time() + wait
+        while time.time() < deadline:
+            if not any(b"--remote-debugging-port" in cmd for _, cmd in _heroic_processes()):
+                time.sleep(1)    # let the Flatpak sandbox and Heroic's lock go away too
+                return {}
+            time.sleep(0.25)
+    return {"error": "heroic-not-stopped"}
 
 
 def _active_debug_port(heroic_dir: Path | None, newer_than: float = 0) -> int | None:
@@ -1185,6 +1577,9 @@ def launch_game(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
     status = game_shortcut_status(runner, app_name)
     if status != "ready":
         return {"error": {"missing": "no-shortcut", "restart": "restart-steam"}.get(status, status)}
+    stopped = stop_our_heroic(heroic_dir)
+    if "error" in stopped:
+        return stopped
     steam_run(shortcut_gameid(find_game_shortcut(runner, app_name)[0]))
     return {"via": "steam-shortcut"}
 

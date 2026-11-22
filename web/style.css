@@ -207,3 +207,25 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 /* install options + download progress */
 .opt.info { background: transparent; color: var(--mute); }
 .row .sub .dl, #detail .state .dl { color: var(--accent); }
+
+/* how long to beat (only with an IGDB key) */
+body.lengths .row { grid-template-columns: 2.6rem minmax(0, 1fr) 5.2rem 9rem; }
+body:not(.lengths) .row .len { display: none; }
+.len { text-align: right; line-height: 1.1; }
+.len .t { font-size: 1.15rem; font-weight: 700; }
+.len .lbl { font-size: 0.68rem; color: var(--mute); white-space: nowrap; }
+.len.none .t { color: var(--line); }
+#detail .hl-title { margin-top: .7rem; font-size: .8rem; color: var(--mute); text-transform: uppercase; letter-spacing: .05em; }
+#detail .hl-title span { text-transform: none; letter-spacing: 0; }
+#detail .hl-box { display: flex; gap: .5rem; margin: .4rem 0 .5rem; }
+#detail .hl-box div { flex: 1; background: var(--panel2); border-radius: .4rem; padding: .45rem .5rem; text-align: center; }
+#detail .hl-box b { display: block; font-size: 1.25rem; }
+#detail .hl-box small { color: var(--mute); font-size: .72rem; }
+
+/* IGDB extras in the details panel */
+#detail .ig-line { font-size: .88rem; color: var(--mute); margin-top: .25rem; }
+#detail .ig-line b { color: var(--text); }
+#detail .glinks { display: flex; flex-wrap: wrap; gap: .35rem; margin: .35rem 0 .4rem; }
+#detail .glink { background: var(--panel2); border: 1px solid var(--line); border-radius: .35rem; padding: .15rem .5rem;
+                 font-size: .82rem; cursor: pointer; }
+#detail .glink:hover { border-color: var(--accent); }

@@ -1,4 +1,4 @@
-import json, sys, tempfile, unittest
+import json, os, sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import heroic_ratings as h
@@ -107,10 +107,41 @@ class Library(unittest.TestCase):
             finally:
                 h.STEAM_USERDATA = saved
 
+    def test_steam_start_time_from_pid_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved = h.STEAM_PID_FILE
+            try:
+                h.STEAM_PID_FILE = Path(d, "steam.pid")
+                h.STEAM_PID_FILE.write_text(str(os.getpid()))        # a process we can see: ourselves
+                t = h.steam_start_time()
+                self.assertIsNotNone(t)
+                self.assertLess(abs(t - h._process_start(os.getpid())), 1)
+                self.assertLessEqual(t, time.time())
+                h.STEAM_PID_FILE.write_text("999999999")             # stale PID: not the running client
+                self.assertNotEqual(h.steam_start_time(), t)
+            finally:
+                h.STEAM_PID_FILE = saved
+
+    def test_shortcut_added_before_steam_restart_counts_as_loaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d, "shortcuts.vdf"); f.write_bytes(b"x")
+            saved = (h.SHORTCUT_STATE_FILE, h.steam_start_time)
+            h.SHORTCUT_STATE_FILE = Path(d, "state.json")
+            entry = {"appid": ("int", 3589654731)}
+            try:
+                now = time.time()
+                h.steam_start_time = lambda: now - 600            # Steam started 10 min ago, file newer
+                self.assertFalse(h.shortcut_loaded_by_steam(entry, f))   # Trine first seen now: not loaded
+                h.steam_start_time = lambda: now + 150            # Steam restarted after that
+                self.assertTrue(h.shortcut_loaded_by_steam(entry, f))
+            finally:
+                h.SHORTCUT_STATE_FILE, h.steam_start_time = saved
+
     def test_launch_only_through_loaded_shortcut(self):
-        saved = (h.game_shortcut_status, h.find_game_shortcut, h.steam_run)
+        saved = (h.game_shortcut_status, h.find_game_shortcut, h.steam_run, h.stop_our_heroic)
         ran = []
         h.steam_run = ran.append
+        h.stop_our_heroic = lambda d: {}
         h.find_game_shortcut = lambda r, a: ({"appid": ("int", 5)}, Path("x"))
         try:
             for status, expected in [("missing", "no-shortcut"), ("restart", "restart-steam"), ("steam-not-running", "steam-not-running")]:
@@ -120,8 +151,70 @@ class Library(unittest.TestCase):
             h.game_shortcut_status = lambda r, a: "ready"
             self.assertEqual(h.launch_game("legendary", "Eel", None), {"via": "steam-shortcut"})
             self.assertEqual(ran, [(5 << 32) | 0x02000000])
+            h.stop_our_heroic = lambda d: {"error": "heroic-busy", "busy": ["legendary:X"]}   # downloading: don't launch
+            self.assertEqual(h.launch_game("legendary", "Eel", None)["error"], "heroic-busy")
+            self.assertEqual(len(ran), 1)
         finally:
-            h.game_shortcut_status, h.find_game_shortcut, h.steam_run = saved
+            h.game_shortcut_status, h.find_game_shortcut, h.steam_run, h.stop_our_heroic = saved
+
+    def test_igdb_steam_lookup_with_old_field_fallback(self):
+        import urllib.error
+        igdb = h.IGDB("id", "secret")
+        calls = []
+        def query(endpoint, body):
+            calls.append(body)
+            if "external_game_source" in body:
+                raise urllib.error.HTTPError("u", 400, "bad field", {}, None)
+            return [{"game": 77, "uid": "1794680"}]
+        igdb.query = query
+        self.assertEqual(igdb.steam_to_igdb([1794680, 22330]), {1794680: 77})
+        self.assertEqual(igdb.source_field, "category")
+        self.assertIn("category = 1", calls[1])
+
+    def test_igdb_details_parsing(self):
+        igdb = h.IGDB("id", "secret")
+        def query(endpoint, body):
+            if endpoint == "games":
+                return [{"id": 77, "name": "Vampire Survivors", "rating": 81.2, "rating_count": 397,
+                         "aggregated_rating": 90.6, "aggregated_rating_count": 5,
+                         "game_modes": [{"id": 1, "name": "Single player"}, {"id": 3, "name": "Co-operative"}],
+                         "player_perspectives": [{"id": 4, "name": "Bird view / Isometric"}],
+                         "collections": [{"id": 9, "name": "Vampire Survivors"}], "similar_games": [5, 6],
+                         "cover": {"id": 1, "image_id": "abc"}, "first_release_date": 1666224000,
+                         "involved_companies": [{"developer": True, "company": {"name": "Poncle"}}],
+                         "multiplayer_modes": [{"id": 1, "offlinecoop": True, "offlinecoopmax": 4}]}]
+            return [{"game_id": 77, "hastily": 54000, "normally": 100800, "completely": 999 * 3600}]
+        igdb.query = query
+        d = igdb.details([77])[77]
+        self.assertEqual((d["user"], d["user_n"], d["critic"], d["critic_n"]), (81, 397, 91, 5))
+        self.assertEqual(d["modes"], ["Single player", "Co-operative"])
+        self.assertEqual(d["mp"], {"offlinecoop": True, "offlinecoopmax": 4})
+        self.assertEqual((d["main"], d["extra"], d["comp"]), (15.0, 28.0, None))   # 999h is a placeholder
+        self.assertEqual((d["year"], d["devs"], d["series"]), (2022, ["Poncle"], ["Vampire Survivors"]))
+        self.assertTrue(d["cover"].endswith("/abc.jpg"))
+
+    def test_critic_score_choice(self):
+        pick = lambda meta, wd, ig: (lambda o: (h.State._pick_critic(o, wd, ig), o)[1])({"metascore": meta, "percent": None})
+        ig = lambda score, n: {"critic": score, "critic_n": n}
+        # IGDB wins when solid and Wikidata doesn't have more reviews
+        o = pick(None, {"score": 80, "by": "OpenCritic", "n": 4}, ig(85, 7))
+        self.assertEqual((o["critic"], o["critic_by"], o["rating"]), (85, "IGDB", 85.0))
+        # Wikidata (OpenCritic) wins with more reviews…
+        o = pick(None, {"score": 83, "by": "OpenCritic", "n": 33}, ig(84, 7))
+        self.assertEqual((o["critic"], o["critic_by"], o["critic_n"]), (83, "OpenCritic", 33))
+        # …or when IGDB is thin (under 3 reviews), even with an unknown count
+        o = pick(None, {"score": 72, "by": "OpenCritic", "n": None}, ig(50, 1))
+        self.assertEqual(o["critic_by"], "OpenCritic")
+        # thin IGDB and no Wikidata: no critic score
+        self.assertNotIn("critic", pick(None, None, ig(100, 1)))
+        # a Metascore comes first for the Critic score sort
+        o = pick(76, {"score": 77, "by": "OpenCritic", "n": 59}, ig(74, 7))
+        self.assertEqual((o["critic_score"], o["critic_src"], o["critic_by"]), (76, "Metascore", "OpenCritic"))
+
+    def test_wikidata_review_count(self):
+        claim = {"qualifiers": {"P7887": [{"datavalue": {"value": {"amount": "+33", "unit": "1"}}}]}}
+        self.assertEqual(h._wd_review_count(claim), 33)
+        self.assertIsNone(h._wd_review_count({"qualifiers": {}}))
 
     def test_desktop_layout_detection(self):
         f = h.desktop_layout_likely
