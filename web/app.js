@@ -369,8 +369,6 @@ function openMenu() {
       { label: "Installed only", value: S.installedOnly ? "On" : "Off", change: () => { S.installedOnly = !S.installedOnly; refilter(); } },
       { label: "Hide unrated games", value: S.hideUnrated ? "On" : "Off", change: () => { S.hideUnrated = !S.hideUnrated; refilter(); } },
       { label: "Search…", activate: () => { closeModal(); focusSearch(); } },
-      { label: "Heroic (Debug) Steam shortcut", value: SHORTCUT_TEXT[shortcut.state] || "Checking…",
-        activate: () => { closeModal(); checkShortcut(true); } },
       { label: "Controller test", activate: () => { closeModal(); openDiag(); } },
       ...(g && g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
       ...(g && g.appid ? [{ label: `Wrong Steam match for “${g.title}”`, activate: () => wrongMatch(g) }] : []),
@@ -418,23 +416,20 @@ function launchSelected() {
   openModal({
     kind: "confirm", yes: "Launch", html: `Launch <b>${esc(g.title)}</b>?`,
     onYes: async () => {
-      // Through the game's own Steam shortcut if Steam has it, otherwise through
-      // Heroic (Debug); either way the game runs as its own Steam app, not inside this one.
-      pauseFor(`Playing ${g.title}`, "Starting…");
+      // Only through the game's own Steam shortcut, so it runs as its own Steam app
+      // and keeps running when this app closes. Refused (with the reason) otherwise.
+      pauseFor(`Playing ${g.title}`, "Starting through Steam…");
       let r;
       try { r = await api("/api/launch", { id: g.id }); } catch { r = { error: "network" }; }
-      if (r.ok) {
-        $("pausedSub").textContent = r.via === "steam-shortcut" ? "Started through its Steam shortcut." : "Started through Heroic.";
-        return;
-      }
-      resume();
-      heroicProblem(r.error, `launch <b>${esc(g.title)}</b>`, "");
+      if (r.ok) return;
+      resume(true);
+      heroicProblem(r.error, `launch <b>${esc(g.title)}</b>`, "", g);
     },
   });
 }
 
 // Installing: Heroic's own "install?" prompt is broken (Heroic issue #6053), so the
-// app reads the same options Heroic's install dialog offers (through Heroic (Debug)),
+// app reads the same options Heroic's install dialog offers (from a hidden Heroic),
 // shows them here, and queues the install with Heroic's own install function.
 const fmtSize = b => !b ? "?" : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GB" : Math.max(1, Math.round(b / 1048576)) + " MB";
 const langName = (() => {
@@ -568,10 +563,16 @@ async function uninstallFlow(g) {
 }
 
 async function startUninstall(g, st) {
+  // Show "Uninstalling…" straight away; pollDownloads keeps it until the library shows the game as removed.
+  const mark = on => {
+    if (on) S.downloads[g.id] = { uninstalling: true, was: true, since: Date.now() }; else delete S.downloads[g.id];
+    if (rowCache.has(g.id)) { const el = rowEl(g); if (S.view[S.sel]?.id === g.id) { el.classList.add("sel"); renderDetail(g); } }
+  };
+  mark(true);
   let r;
   try { r = await api("/api/uninstall-start", { id: g.id, removePrefix: st.prefix, removeSettings: st.settings }); } catch { r = { error: "network" }; }
-  if (r.result === "started" || r.result === "done") { toast(`Uninstalling ${g.title}…`, 3000); setTimeout(pollDownloads, 800); if (r.result === "done") setTimeout(loadGames, 1500); }
-  else heroicProblem(r.error || r.result, `uninstall <b>${esc(g.title)}</b>`, "");
+  if (r.result === "started" || r.result === "done") { toast(`Uninstalling ${g.title}…`, 3000); setTimeout(pollDownloads, 800); }
+  else { mark(false); heroicProblem(r.error || r.result, `uninstall <b>${esc(g.title)}</b>`, ""); }
 }
 
 // Download progress from Heroic's queue, shown on the game's row and in its details.
@@ -580,10 +581,12 @@ function downloadText(g, long = false) {
   const d = S.downloads[g.id];
   if (!d) return "";
   if (d.uninstalling) return "Uninstalling…";
-  if (!d.active) return long ? "Queued in Heroic" : "Queued";
+  if (d.finishing) return long ? "Finishing install…" : "Finishing…";
+  if (!d.active) return long ? "Queued in Heroic · keep this app open until it finishes" : "Queued";
   const pct = d.percent != null ? Math.round(d.percent) + "%" : "";
   if (!long) return `⬇ ${pct || "Downloading"}`;
-  return ["Downloading " + pct, d.speed ? d.speed.toFixed(1) + " MiB/s" : "", d.eta ? d.eta + " left" : ""].filter(Boolean).join(" · ");
+  return ["Downloading " + pct, d.speed ? d.speed.toFixed(1) + " MiB/s" : "", d.eta ? d.eta + " left" : "",
+          "keep this app open until it finishes"].filter(Boolean).join(" · ");
 }
 async function pollDownloads() {
   let d;
@@ -595,9 +598,22 @@ async function pollDownloads() {
                                           speed: pr.progress?.downSpeed, eta: pr.progress?.eta };
   });
   if (d.running) for (const u of d.uninstalling || []) next[`${u.runner}:${u.appName}`] = { uninstalling: true };
+  // Heroic says it's done, but our library may not show the change yet: keep the status
+  // ("Uninstalling…" / "Finishing…") until the installed state flips, or for at most 30 s.
+  const now = Date.now();
+  let waiting = false;
+  for (const [id, prev] of Object.entries(S.downloads)) {
+    if (next[id]) continue;
+    const g = S.games.find(x => x.id === id);
+    const was = prev.was ?? g?.installed;
+    if (g && g.installed === was && now - (prev.since || now) < 30000) {
+      next[id] = prev.uninstalling ? { uninstalling: true, was, since: prev.since || now }
+                                   : { finishing: true, was, since: prev.since || now };
+      waiting = true;
+    }
+  }
   const ids = new Set([...Object.keys(next), ...Object.keys(S.downloads)]);
   const changed = [...ids].filter(id => JSON.stringify(next[id]) !== JSON.stringify(S.downloads[id]));
-  const finished = Object.keys(S.downloads).some(id => !next[id]);
   S.downloads = next;
   for (const id of changed) {
     const g = S.games.find(x => x.id === id);
@@ -605,57 +621,58 @@ async function pollDownloads() {
     const el = rowEl(g);
     if (S.view[S.sel]?.id === id) { el.classList.add("sel"); renderDetail(g); }
   }
-  if (finished) setTimeout(loadGames, 1500);   // let Heroic write installed.json first
+  if (waiting) {   // ask the backend to re-read Heroic's install list now, then refresh
+    try { await api("/api/reload-library", {}); } catch {}
+    await loadGames();
+    for (const id of Object.keys(S.downloads)) {   // installed state flipped: drop the status now
+      const e = S.downloads[id], g = S.games.find(x => x.id === id);
+      if (e.was !== undefined && g && g.installed !== e.was) {
+        delete S.downloads[id];
+        if (g.installed) afterInstall(g);
+        if (rowCache.has(id)) { const el = rowEl(g); if (S.view[S.sel]?.id === id) { el.classList.add("sel"); renderDetail(g); } }
+      }
+    }
+  }
 }
 setInterval(pollDownloads, 2500);
 
-// Shared explanations for why Heroic (Debug) couldn't be used.
-function heroicProblem(code, what, extra) {
+// Shared explanations when Heroic or Steam can't do what was asked.
+const RESTART_HTML = `<div class="note">Restart Steam: <b>Steam button → Power → Restart Steam</b>
+  (in Desktop Mode, quit Steam and start it again).</div>`;
+function heroicProblem(code, what, extra, g) {
+  const title = g ? `<b>${esc(g.title)}</b>` : "this game";
   const msg = {
-    "heroic-running": `Heroic is already open, but not from this app's <b>Heroic (Debug)</b> shortcut, so this app can't ${what}.
+    "heroic-running": `Heroic is already open, so this app can't ${what}.
       <div class="note">Quit Heroic completely (Desktop Mode: tray icon → Quit; Game Mode: Steam button → Heroic → Exit game), then try again. ${extra}</div>`,
-    "shortcut-restart": `Steam hasn't loaded the <b>Heroic (Debug)</b> shortcut yet. ${RESTART_HTML}`,
-    "shortcut-outdated": `The <b>Heroic (Debug)</b> Steam shortcut needs updating. Open the menu and choose <b>Heroic (Debug) Steam shortcut</b>.`,
-    "shortcut-missing": `The <b>Heroic (Debug)</b> Steam shortcut is missing. Open the menu and choose <b>Heroic (Debug) Steam shortcut</b> to add it.`,
-    "shortcut-no-steam": `Steam's user folder wasn't found, so the <b>Heroic (Debug)</b> shortcut can't be used.`,
+    "heroic-not-started": `Heroic didn't start within 45 seconds, so this app couldn't ${what}.<div class="note">Try again. ${extra}</div>`,
+    "restart-steam": `Steam can't launch ${title} yet: it was added to Steam after Steam started. ${RESTART_HTML}`,
+    "no-shortcut": `${title} isn't in Steam, so this app won't launch it (it would close when this app closes).
+      <div class="note">In Heroic, open the game and choose <b>Add to Steam</b>, then restart Steam.</div>`,
     "steam-not-running": `Steam isn't running. Start Steam, then try again.`,
-    "heroic-not-started": `Heroic didn't start from the <b>Heroic (Debug)</b> shortcut within 45 seconds.
-      <div class="note">Try again, or start Heroic (Debug) from Steam's Hidden collection to check it works. ${extra}</div>`,
   }[code];
   openModal({ kind: "confirm", yes: "OK", onYes: () => {},
     html: msg || `Couldn't ${what} <span class="note">(${esc(code || "unknown")})</span>.<div class="note">${extra}</div>` });
 }
 
-// The app starts Heroic through its own hidden Steam shortcut, "Heroic (Debug)", so
-// Heroic and its games run as their own Steam app (not inside this one) and with the
-// debug port the install helper needs. It's added automatically on first start;
-// Steam then needs one restart to load it.
-const SHORTCUT_TEXT = { ready: "Ready", restart: "Restart Steam", missing: "Missing", outdated: "Updating…", "no-steam": "Steam not found", error: "Error" };
-let shortcut = { state: null };
-const RESTART_HTML = `<div class="note">Restart Steam to finish setting it up:
-  <b>Steam button → Power → Restart Steam</b> (in Desktop Mode, quit Steam and start it again).</div>`;
-async function checkShortcut(fromMenu = false) {
-  try { shortcut = await api("/api/steam-shortcut", {}); } catch { shortcut = { state: "error", error: "no reply" }; }
-  if (shortcut.state === "missing" || shortcut.state === "outdated") {
-    const updating = shortcut.state === "outdated";
-    try { shortcut = await api("/api/steam-shortcut", { add: true }); } catch { shortcut = { state: "error", error: "no reply" }; }
-    if (shortcut.ok) {
-      openModal({ kind: "confirm", yes: "OK", onYes: () => {}, html: updating
-        ? `Updated the <b>Heroic (Debug)</b> Steam shortcut (Heroic now starts in the background). ${RESTART_HTML}`
-        : `Added a hidden <b>Heroic (Debug)</b> shortcut to Steam.
-        This app uses it to start Heroic for installs and launches. ${RESTART_HTML}` });
-      return;
-    }
-    shortcut.state = "error";
+// Once at start-up: remove the "Heroic (Debug)" shortcut an earlier version added, and
+// note which game shortcuts exist now (to tell later which ones Steam hasn't loaded).
+api("/api/steam-setup", {}).then(r => { if (r.removed_old_shortcut) toast("Removed the old Heroic (Debug) shortcut from Steam", 4000); }).catch(() => {});
+
+// After an install: Steam can only launch the game through the shortcut Heroic adds,
+// once Steam has been restarted. Heroic adds it as the install finishes, so wait a bit.
+async function afterInstall(g) {
+  let st = "missing";
+  for (let i = 0; i < 10; i++) {
+    try { st = (await api("/api/game-shortcut", { id: g.id })).status; } catch {}
+    if (st !== "missing") break;
+    await new Promise(r => setTimeout(r, 1000));
   }
-  if (shortcut.state === "restart" || (fromMenu && shortcut.state !== "ready"))
-    openModal({ kind: "confirm", yes: "OK", onYes: () => {}, html: shortcut.state === "restart"
-      ? `The <b>Heroic (Debug)</b> shortcut has been added, but Steam hasn't loaded it yet. ${RESTART_HTML}`
-      : `Couldn't set up the <b>Heroic (Debug)</b> Steam shortcut: ${esc(shortcut.error || SHORTCUT_TEXT[shortcut.state] || "unknown")}` });
-  else if (fromMenu)
-    toast("Heroic (Debug) shortcut is set up", 2500);
+  if (st !== "restart" && st !== "missing") { toast(`${g.title} is installed`, 3500); return; }
+  openModal({ kind: "confirm", yes: "OK", onYes: () => {}, html: st === "restart"
+    ? `<b>${esc(g.title)}</b> is installed. ${RESTART_HTML.replace("Restart Steam:", "To play it, restart Steam:")}`
+    : `<b>${esc(g.title)}</b> is installed, but Heroic didn't add it to Steam, so this app can't launch it.
+      <div class="note">In Heroic, open the game and choose <b>Add to Steam</b> (or turn on <i>Add games to Steam automatically</i> in Heroic's settings), then restart Steam.</div>` });
 }
-checkShortcut();
 
 function focusSearch() {
   els.search.focus();

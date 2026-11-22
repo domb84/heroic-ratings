@@ -563,10 +563,11 @@ class State:
                 pass
         return tuple(sig)
 
-    def maybe_reload_library(self):
-        """Pick up installs/uninstalls/new games made in Heroic (checked at most every 5 s)."""
+    def maybe_reload_library(self, force: bool = False):
+        """Pick up installs/uninstalls/new games made in Heroic (checked at most every 5 s,
+        or right away with force, e.g. when Heroic has just finished an install)."""
         now = time.monotonic()
-        if now - getattr(self, "_lib_checked", 0) < 5:
+        if not force and now - getattr(self, "_lib_checked", 0) < 5:
             return
         self._lib_checked = now
         sig = self._library_signature()
@@ -789,22 +790,23 @@ def spawn_detached(cmd: list[str]):
                      stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-# ------------------------------------------------------------------- our Steam shortcut for Heroic
+# ------------------------------------------------------------------- Steam shortcuts
 #
-# In Game Mode, Steam treats everything started under our shortcut as one game:
-# a game launched through a Heroic that we started runs inside our app and dies
-# with it. So the app adds its own hidden non-Steam shortcut, "Heroic (Debug)",
-# which starts Heroic with its debug port, and uses it for all installs and
-# launches. Steam reads shortcuts.vdf only when it starts, so after adding the
-# shortcut Steam needs one restart.
+# In Game Mode, Steam treats everything started under our shortcut as one game, so a
+# game launched through a Heroic we started would run inside our app and die with it.
+# Games are therefore launched only through their own Steam shortcuts (Heroic adds one
+# per installed game). Steam reads shortcuts.vdf only when it starts, so a game
+# installed since then needs a Steam restart before it can be launched.
+#
+# Heroic itself (for install options, installs, uninstalls and progress) runs hidden
+# as part of this app, with Chromium's debug port, which the app uses to drive it.
 
 STEAM_USERDATA = ([Path(os.environ["HEROIC_RATINGS_STEAM_USERDATA"])] if os.environ.get("HEROIC_RATINGS_STEAM_USERDATA")
                   else [HOME / ".local/share/Steam/userdata", HOME / ".steam/steam/userdata"])
-DEBUG_SHORTCUT_NAME = "Heroic (Debug)"
-# --no-gui: Heroic starts with its window hidden (it still loads, so the debug port works),
-# so it doesn't pop up in front of this app.
-HEROIC_DEBUG_ARGS = "--no-gui --no-sandbox --remote-debugging-port=0 --remote-debugging-address=127.0.0.1"
+# --no-gui: Heroic's window stays hidden (it still loads, so the debug port works).
+HEROIC_DEBUG_ARGS = ["--no-gui", "--no-sandbox", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"]
 SHORTCUT_STATE_FILE = DATA_DIR / "steam-shortcut.json"
+OLD_DEBUG_SHORTCUT_NAME = "Heroic (Debug)"   # added by an earlier version of this app; removed now
 
 
 def vdf_load(data: bytes) -> dict:
@@ -872,39 +874,38 @@ def shortcut_files() -> list[Path]:
     return files
 
 
-def find_debug_shortcut(root: dict) -> dict | None:
-    for entry in root.get("shortcuts", {}).values():
-        if isinstance(entry, dict) and (_field(entry, "AppName") or "") == DEBUG_SHORTCUT_NAME:
-            return entry
-    return None
+def remove_old_debug_shortcut() -> list[str]:
+    """Remove the hidden "Heroic (Debug)" shortcut an earlier version of this app added."""
+    changed = []
+    for f in shortcut_files():
+        try:
+            data = f.read_bytes()
+            root = vdf_load(data)
+        except (OSError, ValueError, IndexError):
+            continue
+        sc = root.get("shortcuts", {})
+        keep = [v for v in sc.values() if not (isinstance(v, dict) and (_field(v, "AppName") or "") == OLD_DEBUG_SHORTCUT_NAME)]
+        if len(keep) == len(sc):
+            continue
+        root["shortcuts"] = {str(i): v for i, v in enumerate(keep)}   # Steam numbers them 0, 1, 2…
+        new = vdf_dump(root)
+        vdf_load(new)
+        f.with_name(f"shortcuts.vdf.heroic-ratings-{time.strftime('%Y%m%d-%H%M%S')}.bak").write_bytes(data)
+        tmp = f.with_name("shortcuts.vdf.heroic-ratings.tmp")
+        tmp.write_bytes(new)
+        os.replace(tmp, f)
+        changed.append(str(f))
+        log("removed the old", OLD_DEBUG_SHORTCUT_NAME, "shortcut from", f)
+    return changed
 
 
-def heroic_shortcut_target() -> tuple[str, str, str]:
-    """(exe, start dir, launch options) that start Heroic with its debug port."""
+def heroic_debug_command() -> list[str]:
+    """Start Heroic hidden, with its debug port (it runs as part of this app)."""
     if shutil.which("flatpak") and (HOME / ".var/app" / HEROIC_FLATPAK_ID).is_dir():
-        flatpak = shutil.which("flatpak")
-        return f'"{flatpak}"', str(Path(flatpak).parent) + "/", f"run {HEROIC_FLATPAK_ID} {HEROIC_DEBUG_ARGS}"
-    heroic = shutil.which("heroic")
-    if heroic:
-        return f'"{heroic}"', str(Path(heroic).parent) + "/", HEROIC_DEBUG_ARGS
+        return ["flatpak", "run", HEROIC_FLATPAK_ID, *HEROIC_DEBUG_ARGS]
+    if shutil.which("heroic"):
+        return ["heroic", *HEROIC_DEBUG_ARGS]
     raise OSError("Heroic isn't installed (neither the Flatpak nor a 'heroic' command was found)")
-
-
-def shortcut_appid(exe: str, name: str) -> int:
-    """The ID Steam itself gives a non-Steam shortcut."""
-    import zlib
-    return zlib.crc32((exe + name).encode()) | 0x80000000
-
-
-def new_shortcut_entry(exe: str, start_dir: str, options: str) -> dict:
-    # Same fields, order and key spelling as the shortcuts Steam writes itself.
-    return {
-        "appid": ("int", shortcut_appid(exe, DEBUG_SHORTCUT_NAME)), "appname": DEBUG_SHORTCUT_NAME,
-        "exe": exe, "StartDir": start_dir, "icon": "", "ShortcutPath": "", "LaunchOptions": options,
-        "IsHidden": ("int", 1), "AllowDesktopConfig": ("int", 1), "AllowOverlay": ("int", 1),
-        "OpenVR": ("int", 0), "Devkit": ("int", 0), "DevkitGameID": "", "DevkitOverrideAppID": ("int", 0),
-        "LastPlayTime": ("int", 0), "FlatpakAppID": "", "sortas": "", "tags": {},
-    }
 
 
 def steam_start_time() -> float | None:
@@ -933,76 +934,6 @@ def _load_shortcut_state() -> dict:
         return json.loads(SHORTCUT_STATE_FILE.read_text())
     except (OSError, ValueError):
         return {}
-
-
-def debug_shortcut_status() -> dict:
-    """{"state": "missing" | "restart" | "ready" | "no-steam", "gameid", ...}"""
-    files = shortcut_files()
-    if not files:
-        return {"state": "no-steam", "error": "No Steam user folder found"}
-    entry = None
-    for f in files:
-        try:
-            entry = find_debug_shortcut(vdf_load(f.read_bytes())) if f.exists() else None
-        except (OSError, ValueError, IndexError):
-            entry = None
-        if entry:
-            break
-    if not entry:
-        return {"state": "missing"}
-    try:
-        exe, _, options = heroic_shortcut_target()
-        if (_field(entry, "Exe"), _field(entry, "LaunchOptions")) != (exe, options):
-            return {"state": "outdated"}       # made by an older version of this app
-    except OSError:
-        pass
-    gameid = shortcut_gameid(entry)
-    added = _load_shortcut_state().get("added_at")
-    started = steam_start_time()
-    # Added by us after the running Steam started -> Steam hasn't loaded it yet.
-    if added and started and started < added:
-        return {"state": "restart", "gameid": gameid}
-    return {"state": "ready", "gameid": gameid}
-
-
-def add_debug_shortcut() -> dict:
-    """Add the hidden "Heroic (Debug)" shortcut to every Steam user that lacks it, or bring
-    an existing one up to date (same entry and ID, just its command)."""
-    exe, start_dir, options = heroic_shortcut_target()
-    changed = []
-    for f in shortcut_files():
-        data = f.read_bytes() if f.exists() else b"\x00shortcuts\x00\x08\x08"
-        root = vdf_load(data)
-        entry = find_debug_shortcut(root)
-        if entry:
-            if (_field(entry, "Exe"), _field(entry, "LaunchOptions")) == (exe, options):
-                continue
-            for k in list(entry):
-                if k.lower() == "exe":
-                    entry[k] = exe
-                elif k.lower() == "startdir":
-                    entry[k] = start_dir
-                elif k.lower() == "launchoptions":
-                    entry[k] = options
-        else:
-            shortcuts = root.setdefault("shortcuts", {})
-            index = max((int(k) for k in shortcuts if k.isdigit()), default=-1) + 1
-            shortcuts[str(index)] = new_shortcut_entry(exe, start_dir, options)
-        new = vdf_dump(root)
-        if find_debug_shortcut(vdf_load(new)) is None:   # must parse back with our entry in it
-            raise ValueError("shortcuts.vdf check failed; nothing written")
-        if f.exists():
-            backup = f.with_name(f"shortcuts.vdf.heroic-ratings-{time.strftime('%Y%m%d-%H%M%S')}.bak")
-            backup.write_bytes(data)
-        tmp = f.with_name("shortcuts.vdf.heroic-ratings.tmp")
-        tmp.write_bytes(new)
-        os.replace(tmp, f)
-        changed.append(str(f))
-        log("added/updated the", DEBUG_SHORTCUT_NAME, "shortcut in", f)
-    if changed:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        SHORTCUT_STATE_FILE.write_text(json.dumps({"added_at": time.time(), "files": changed}))
-    return {"ok": True, "changed": changed, **debug_shortcut_status()}
 
 
 _HEROIC_URL_RE = re.compile(r"heroic://launch(?:/(?P<r1>[\w-]+)/(?P<a1>[^\s\"'&?]+)|\?(?P<q>[^\s\"']+))")
@@ -1214,11 +1145,10 @@ def _active_debug_port(heroic_dir: Path | None, newer_than: float = 0) -> int | 
 
 
 def ensure_debug_heroic(heroic_dir: Path | None, wait: float = 45) -> dict:
-    """Make sure Heroic is running from our "Heroic (Debug)" Steam shortcut.
+    """Make sure a hidden Heroic with its debug port is running (started by us if needed).
 
-    Returns {"ws": <debug socket of Heroic's window>} or {"error": ...}. A Heroic
-    started any other way has no debug port, and games it launches might end up
-    inside our app, so the user is asked to quit it instead.
+    Returns {"ws": <debug socket of Heroic's window>} or {"error": ...}. A Heroic started
+    some other way has no debug port, so the user is asked to quit it instead.
     """
     port = _active_debug_port(heroic_dir)
     ws = _heroic_page_ws(port) if port else None
@@ -1226,37 +1156,37 @@ def ensure_debug_heroic(heroic_dir: Path | None, wait: float = 45) -> dict:
         return {"ws": ws}
     if heroic_running():
         return {"error": "heroic-running"}
-    sc = debug_shortcut_status()
-    if sc["state"] != "ready":
-        return {"error": "shortcut-" + sc["state"]}
-    if not steam_start_time():
-        return {"error": "steam-not-running"}
     started = time.time()
-    steam_run(sc["gameid"])
+    spawn_detached(heroic_debug_command())
     while time.time() < started + wait:
         time.sleep(0.5)
         port = _active_debug_port(heroic_dir, newer_than=started - 2)
         ws = _heroic_page_ws(port) if port else None
         if ws:
             return {"ws": ws}
-    log("Heroic (Debug) didn't come up (debug port file:", port, ")")
+    log("Heroic didn't come up (debug port file:", port, ")")
     return {"error": "heroic-not-started"}
 
 
-def launch_game(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
-    """Launch a game outside our app: through its own Steam shortcut when Steam has loaded
-    it, otherwise through Heroic (Debug). Returns {"via": ...} or {"error": ...}."""
+def game_shortcut_status(runner: str, app_name: str) -> str:
+    """"ready" (Steam can launch it), "restart" (added since Steam started),
+    "missing" (no Steam shortcut) or "steam-not-running"."""
     found = find_game_shortcut(runner, app_name)
-    if found and shortcut_loaded_by_steam(*found):
-        steam_run(shortcut_gameid(found[0]))
-        return {"via": "steam-shortcut"}
-    r = ensure_debug_heroic(heroic_dir)
-    if "error" in r:
-        return r
-    # Heroic (Debug) is running: this short-lived second instance hands the URL to it,
-    # so the game runs under Heroic's Steam entry, not ours.
-    spawn_detached(heroic_command(runner, app_name))
-    return {"via": "heroic"}
+    if not found:
+        return "missing"
+    if not steam_start_time():
+        return "steam-not-running"
+    return "ready" if shortcut_loaded_by_steam(*found) else "restart"
+
+
+def launch_game(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
+    """Launch a game through its own Steam shortcut, so it runs as its own Steam app and
+    not inside ours. Refuses (with the reason) when Steam can't launch it yet."""
+    status = game_shortcut_status(runner, app_name)
+    if status != "ready":
+        return {"error": {"missing": "no-shortcut", "restart": "restart-steam"}.get(status, status)}
+    steam_run(shortcut_gameid(find_game_shortcut(runner, app_name)[0]))
+    return {"via": "steam-shortcut"}
 
 
 def shortcut_gameid(entry: dict) -> int:
@@ -1574,14 +1504,18 @@ def make_handler(state: State, on_quit):
                 body = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 return self._json({"error": "bad json"}, 400)
-            if path == "/api/steam-shortcut":
+            if path == "/api/steam-setup":    # once at start-up
                 try:
-                    if not body.get("add"):
-                        note_game_shortcuts()
-                    return self._json(add_debug_shortcut() if body.get("add")
-                                      else {"ok": True, **debug_shortcut_status()})
+                    removed = remove_old_debug_shortcut()
+                    note_game_shortcuts()
                 except (OSError, ValueError) as e:
                     return self._json({"ok": False, "error": str(e)}, 500)
+                return self._json({"ok": True, "removed_old_shortcut": bool(removed)})
+            if path == "/api/game-shortcut":
+                g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
+                if not g:
+                    return self._json({"error": "unknown game"}, 404)
+                return self._json({"ok": True, "status": game_shortcut_status(g["runner"], g["app_name"])})
             if path in ("/api/install-options", "/api/install-start"):
                 g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
                 if not g:
@@ -1607,6 +1541,9 @@ def make_handler(state: State, on_quit):
                 except OSError as e:
                     return self._json({"error": str(e)}, 500)
                 return self._json({"ok": "error" not in r, **r})
+            if path == "/api/reload-library":   # Heroic just finished an install/uninstall
+                state.maybe_reload_library(force=True)
+                return self._json({"ok": True})
             if path == "/api/downloads":
                 return self._json(heroic_downloads(state.heroic))
             if path in ("/api/launch", "/api/install"):

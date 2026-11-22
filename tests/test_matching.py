@@ -78,6 +78,7 @@ class Library(unittest.TestCase):
         with self.assertRaises(OSError):
             h._MiniWebSocket("ws://192.168.1.5:47317/devtools/page/x")
         self.assertIn("--remote-debugging-address=127.0.0.1", h.HEROIC_DEBUG_ARGS)
+        self.assertIn("--no-gui", h.HEROIC_DEBUG_ARGS)
 
     def test_game_shortcut_url_parsing(self):
         e = {"exe": "flatpak", "LaunchOptions": 'run com.heroicgameslauncher.hgl --no-gui "heroic://launch?appName=Eel&runner=legendary"'}
@@ -85,33 +86,42 @@ class Library(unittest.TestCase):
         self.assertEqual(h._shortcut_game({"exe": "x", "LaunchOptions": "heroic://launch/gog/1207658924"}), ("gog", "1207658924"))
         self.assertIsNone(h._shortcut_game({"exe": "flatpak", "LaunchOptions": "run com.heroicgameslauncher.hgl"}))
 
-    def test_debug_shortcut_added_once_and_round_trips(self):
+    def test_old_debug_shortcut_removed_and_others_kept(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d, "userdata/1/config"); cfg.mkdir(parents=True)
-            other = {"appid": ("int", 123), "AppName": "Other", "LaunchOptions": "x", "tags": {"0": "fav"}}
-            original = h.vdf_dump({"shortcuts": {"0": other}})
+            game = {"appid": ("int", 123), "AppName": "Trine", "LaunchOptions": '"heroic://launch?appName=Eel&runner=legendary"', "tags": {}}
+            old = {"appid": ("int", 456), "appname": "Heroic (Debug)", "LaunchOptions": "run x", "tags": {}}
+            other = {"appid": ("int", 789), "AppName": "Other", "LaunchOptions": "", "tags": {"0": "fav"}}
+            original = h.vdf_dump({"shortcuts": {"0": game, "1": old, "2": other}})
             (cfg / "shortcuts.vdf").write_bytes(original)
             self.assertEqual(h.vdf_dump(h.vdf_load(original)), original)
-            saved = (h.STEAM_USERDATA, h.SHORTCUT_STATE_FILE, h.heroic_shortcut_target)
-            h.STEAM_USERDATA, h.SHORTCUT_STATE_FILE = [Path(d, "userdata")], Path(d, "state.json")
-            h.heroic_shortcut_target = lambda: ('"/usr/bin/flatpak"', "/usr/bin/", "run x " + h.HEROIC_DEBUG_ARGS)
+            saved = h.STEAM_USERDATA
+            h.STEAM_USERDATA = [Path(d, "userdata")]
             try:
-                self.assertEqual(len(h.add_debug_shortcut()["changed"]), 1)
-                self.assertEqual(h.add_debug_shortcut()["changed"], [])
+                self.assertEqual(len(h.remove_old_debug_shortcut()), 1)
+                self.assertEqual(h.remove_old_debug_shortcut(), [])
                 root = h.vdf_load((cfg / "shortcuts.vdf").read_bytes())
-                self.assertEqual(root["shortcuts"]["0"], other)
-                new = h.find_debug_shortcut(root)
-                self.assertEqual(new["IsHidden"], ("int", 1))
-                self.assertIn("--remote-debugging-address=127.0.0.1", new["LaunchOptions"])
+                self.assertEqual(root["shortcuts"], {"0": game, "1": other})   # renumbered, rest untouched
                 self.assertEqual(len(list(cfg.glob("*.bak"))), 1)
-                # a newer app version with different options updates the same entry
-                h.heroic_shortcut_target = lambda: ('"/usr/bin/flatpak"', "/usr/bin/", "run x --no-gui " + h.HEROIC_DEBUG_ARGS)
-                self.assertEqual(len(h.add_debug_shortcut()["changed"]), 1)
-                updated = h.find_debug_shortcut(h.vdf_load((cfg / "shortcuts.vdf").read_bytes()))
-                self.assertEqual(updated["appid"], new["appid"])
-                self.assertIn("--no-gui", updated["LaunchOptions"])
+                self.assertEqual(h.find_game_shortcut("legendary", "Eel")[0], game)
             finally:
-                h.STEAM_USERDATA, h.SHORTCUT_STATE_FILE, h.heroic_shortcut_target = saved
+                h.STEAM_USERDATA = saved
+
+    def test_launch_only_through_loaded_shortcut(self):
+        saved = (h.game_shortcut_status, h.find_game_shortcut, h.steam_run)
+        ran = []
+        h.steam_run = ran.append
+        h.find_game_shortcut = lambda r, a: ({"appid": ("int", 5)}, Path("x"))
+        try:
+            for status, expected in [("missing", "no-shortcut"), ("restart", "restart-steam"), ("steam-not-running", "steam-not-running")]:
+                h.game_shortcut_status = lambda r, a, s=status: s
+                self.assertEqual(h.launch_game("legendary", "Eel", None), {"error": expected})
+            self.assertEqual(ran, [])
+            h.game_shortcut_status = lambda r, a: "ready"
+            self.assertEqual(h.launch_game("legendary", "Eel", None), {"via": "steam-shortcut"})
+            self.assertEqual(ran, [(5 << 32) | 0x02000000])
+        finally:
+            h.game_shortcut_status, h.find_game_shortcut, h.steam_run = saved
 
     def test_desktop_layout_detection(self):
         f = h.desktop_layout_likely

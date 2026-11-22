@@ -73,22 +73,16 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 
 To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, and `/` for search. Mouse and touch also work.
 
-## The "Heroic (Debug)" Steam shortcut
-
-On first start, the app adds a hidden non-Steam shortcut called **Heroic (Debug)** to Steam. It starts Heroic in the background, with no window (`--no-gui`), and with its remote-debugging port (`127.0.0.1` only), and the app will use it to start Heroic for installs and launches. That way Heroic, and the games it runs, belong to their own Steam entry instead of running inside this app, so closing this app doesn't close your game.
-
-Steam only reads its shortcuts when it starts, so **restart Steam once** after the app adds it, or updates it after an app update changes the shortcut (Game Mode: Steam button → Power → Restart Steam). The app backs up `shortcuts.vdf` before changing it (`shortcuts.vdf.heroic-ratings-<date>.bak` next to it), and **Menu → Heroic (Debug) Steam shortcut** shows its status. The shortcut is under Steam's Hidden collection if you want to see it.
-
 ## Launching games
 
-Press **A** on an installed game and confirm. The game always runs as its own Steam app, never inside this one, so closing Heroic Ratings doesn't close it:
+Press **A** on an installed game and confirm. The app launches it **only through the game's own Steam shortcut** (Heroic adds one when it installs a game), so the game runs as its own Steam app and keeps running when you close this app. If that isn't possible, the app says why instead of launching:
 
-1. **The game's own Steam shortcut** (Heroic adds one when it installs a game) is used if Steam has loaded it.
-2. **Otherwise, through Heroic (Debug):** the app starts it via Steam if it isn't running yet, then hands it the launch. A shortcut Heroic added since Steam last started counts as not loaded, so newly installed games take this route until the next Steam restart.
+- **Installed since Steam last started:** Steam only reads its shortcuts when it starts. Restart Steam (Game Mode: Steam button → Power → Restart Steam). The app also reminds you of this when an install finishes.
+- **Not in Steam:** in Heroic, open the game and choose **Add to Steam** (or turn on *Add games to Steam automatically* in Heroic's settings), then restart Steam.
 
 ## Installing games
 
-Press **A** on a game that isn't installed and confirm. The app starts Heroic through the **Heroic (Debug)** shortcut if it isn't running, reads the same options Heroic's install dialog offers, and shows them here. Use ◀ ▶ to change a value and **A** to toggle or select. Only the options a game actually has are shown:
+Press **A** on a game that isn't installed and confirm. The app starts Heroic hidden in the background if it isn't running, reads the same options Heroic's install dialog offers, and shows them here. Use ◀ ▶ to change a value and **A** to toggle or select. Only the options a game actually has are shown:
 
 | Option | Notes |
 | --- | --- |
@@ -100,9 +94,9 @@ Press **A** on a game that isn't installed and confirm. The app starts Heroic th
 | DLC | All owned DLC is selected by default, as in Heroic |
 | Optional components | Epic games with selective downloads |
 
-The download and install size update as you change things. **Install** is blocked if the game won't fit at the chosen location. The install is then queued in Heroic's own download queue, and its progress shows on the game's row and in the details panel (percent, speed, time left). Because Heroic runs as its own Steam app, the download carries on if you close this app. When it finishes, the game shows as Installed.
+The download and install size update as you change things. **Install** is blocked if the game won't fit at the chosen location. The install is then queued in Heroic's own download queue, and its progress shows on the game's row and in the details panel (percent, speed, time left). **Keep this app open until the download finishes:** Heroic runs as part of this app, so closing the app stops the download. When it finishes, the game shows as Installed, and the app reminds you to restart Steam so the game can be launched.
 
-**Why it works this way:** Heroic 2.22.4 can't take install requests from other apps. Its *"…is not installed, do you wish to install it?"* prompt appears, but its Yes button does nothing ([Heroic issue #6053](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/issues/6053)). As a workaround, Heroic (Debug) starts Heroic with Chromium's remote-debugging port (a free port Heroic picks, `127.0.0.1` only), and the app uses it to navigate Heroic's own window. Heroic still does all the downloading and installing.
+**Why it works this way:** Heroic 2.22.4 can't take install requests from other apps. Its *"…is not installed, do you wish to install it?"* prompt appears, but its Yes button does nothing ([Heroic issue #6053](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/issues/6053)). As a workaround, the app starts Heroic with Chromium's remote-debugging port (a free port Heroic picks, `127.0.0.1` only), and the app uses it to navigate Heroic's own window. Heroic still does all the downloading and installing.
 
 ## Uninstalling games
 
@@ -115,7 +109,9 @@ Heroic does the uninstall; the game's row shows "Uninstalling…" until it's don
 
 ## When Heroic is already open
 
-Launches and installs need Heroic to be running from **Heroic (Debug)**. If Heroic is open some other way (your normal Heroic shortcut, or the desktop app), the app asks you to quit it first (Desktop Mode: tray icon → Quit; Game Mode: Steam button → Heroic → Exit game). While Heroic runs from Heroic (Debug), any program on the device could control it through the debug port, including your logged-in stores; the port is gone once Heroic is started normally again.
+Installing and uninstalling need the hidden Heroic that this app starts (with its debug port). If Heroic is already open some other way, the app asks you to quit it first (Desktop Mode: tray icon → Quit; Game Mode: Steam button → Heroic → Exit game). While the app's Heroic runs, any program on the device could control it through the debug port (`127.0.0.1` only), including your logged-in stores; it's gone once Heroic is started normally again.
+
+Earlier versions of this app added a hidden **Heroic (Debug)** Steam shortcut. The app now removes it automatically (backing up `shortcuts.vdf` first).
 
 ## Wrong or missing matches
 
