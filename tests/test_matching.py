@@ -74,6 +74,13 @@ class Library(unittest.TestCase):
     def test_weighted_rating(self):
         self.assertLess(h.weighted_rating(100, 5), h.weighted_rating(95, 100000))
 
+    def test_desktop_layout_detection(self):
+        f = h.desktop_layout_likely
+        self.assertTrue(f({"XDG_CURRENT_DESKTOP": "KDE"}, deck=True))       # Desktop Mode, started directly
+        self.assertFalse(f({"XDG_CURRENT_DESKTOP": "KDE", "SteamGameId": "123"}, deck=True))  # started via Steam
+        self.assertFalse(f({"XDG_CURRENT_DESKTOP": "gamescope"}, deck=True))  # Game Mode
+        self.assertFalse(f({"XDG_CURRENT_DESKTOP": "KDE"}, deck=False))     # not a Deck
+
 
 if __name__ == "__main__":
     unittest.main()

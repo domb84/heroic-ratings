@@ -99,30 +99,55 @@ function buildView(keepId) {
 // existing nodes, so cover images aren't re-downloaded or re-decoded.
 const rowCache = new Map(); // id -> { html, el }
 function rowEl(g) {
-  const html = rowHTML(g);
+  const html = rowHTML(g), score = rowScoreHTML(g);
   let c = rowCache.get(g.id);
   if (!c || c.html !== html) {
     const t = document.createElement("template");
     t.innerHTML = html.trim();
     const el = t.content.firstElementChild;
     if (c?.el.parentNode) c.el.replaceWith(el);
-    c = { html, el };
+    c = { html, el, score: null };
     rowCache.set(g.id, c);
   }
+  // The score column follows the sort, so only it changes when the sort does
+  // (the rest of the row, including its cover image, is left alone).
+  if (c.score !== score) { c.el.querySelector(".score").innerHTML = score; c.score = score; }
   return c.el;
 }
 
 function rowHTML(g) {
-  const p = g.percent;
-  const sc = scoreParts(g);
   const sub = [g.store, g.installed ? '<span class="inst">● Installed</span>' : "", esc(g.genres.slice(0, 3).join(", "))].filter(Boolean).join(" · ");
   return `<div class="row" data-id="${esc(g.id)}">
     ${g.art ? `<img loading="lazy" decoding="async" src="${esc(img(g.art, 120))}" alt="">` : '<div class="noimg"></div>'}
     <div class="t"><div class="name">${esc(g.title)}</div><div class="sub">${sub}</div></div>
-    <div class="score"><div class="pct ${sc.cls}">${sc.big}</div><div class="lbl">${esc(sc.label)}</div></div>
-    <div class="revs">${g.reviews ? fmtN(g.reviews) + "<br>reviews" : ""}</div>
-    ${g.metascore ? `<div class="meta ${mcClass(g.metascore)}">${g.metascore}</div>` : '<div class="meta none">–</div>'}
+    <div class="score"></div>
   </div>`;
+}
+
+// The one value shown in the list: whatever the current sort orders by.
+const mcScoreClass = m => m >= 75 ? "c-pos" : m >= 50 ? "c-mix" : "c-neg";
+function sortValue(g) {
+  const none = label => ({ big: "—", cls: "c-na", label });
+  switch (SORTS[S.sortIdx].key) {
+    case "percent":
+      if (g.percent != null) return { big: g.percent + "%", cls: scoreClass(g.percent), label: g.label };
+      return none(g.critic != null ? "No Steam reviews" : unratedReason(g));
+    case "reviews":
+      if (g.reviews) return { big: fmtN(g.reviews), cls: "c-plain", label: g.reviews === 1 ? "review" : "reviews" };
+      return none(g.critic != null ? "No Steam reviews" : unratedReason(g));
+    case "metascore":
+      return g.metascore ? { big: String(g.metascore), cls: mcScoreClass(g.metascore), label: "Metascore" } : none("No Metascore");
+    case "year":
+      return g.year ? { big: String(g.year), cls: "c-plain", label: "Released" } : none("Release date unknown");
+    default: // Rating (and Title, which has no number of its own)
+      if (g.percent != null && g.rating != null) return { big: Math.round(g.rating), cls: scoreClass(g.rating), label: g.label };
+      if (g.critic != null) return { big: String(g.critic), cls: scoreClass(g.critic), label: "Critics · " + g.critic_by };
+      return none(unratedReason(g));
+  }
+}
+function rowScoreHTML(g) {
+  const v = sortValue(g);
+  return `<div class="pct ${v.cls}">${esc(String(v.big))}</div><div class="lbl">${esc(v.label || "")}</div>`;
 }
 
 function renderAll() {
@@ -201,6 +226,7 @@ async function loadGames() {
   const keep = S.view[S.sel]?.id;
   S.games = d.games;
   S.steamDeck = !!d.steam_deck;
+  if (!layoutChecked) { layoutChecked = true; if (d.desktop_layout) showLayoutWarn(true); }
   S.version = d.version;
   showProgress(d.progress);
   buildView(keep);
@@ -532,6 +558,7 @@ function renderDiag(now) {
 
 function padLoop(now) {
   requestAnimationFrame(padLoop);  // schedule first, so an exception can't stop the loop
+  notePadButtons();
   if (diag) { renderDiag(now); return; }
   if (!document.hasFocus()) {      // another window has focus: never act on the pad
     swallowHeld(readPads(false), now);
@@ -566,7 +593,19 @@ function padLoop(now) {
 // sends A = Enter, B and Menu = Escape, View = Tab, Y = Space, LB = Ctrl, RB = Alt,
 // back grips = PageDown/PageUp, and keeps X for the on-screen keyboard. Escape opens
 // the menu (or closes whatever is open) because B and Menu can't be told apart.
-let layoutHinted = false;
+
+// ---------------------------------------------------------------- Desktop-layout warning
+// In Desktop Mode Steam turns the Deck's buttons into keys (X opens the on-screen
+// keyboard, B and Menu both send Escape). Warn until a real gamepad button arrives,
+// which means the player has switched Steam to its Gamepad layout.
+let padUsed = false, layoutChecked = false;
+function showLayoutWarn(on) { $("layoutWarn").hidden = !on || padUsed; }
+function notePadButtons() {
+  if (padUsed || !navigator.getGamepads) return;
+  for (const p of navigator.getGamepads()) {
+    if (p && p.connected && [0, 1, 2, 3, 8, 9].some(i => p.buttons[i]?.pressed)) { padUsed = true; showLayoutWarn(false); return; }
+  }
+}
 const KEYS = {
   ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "a", " ": "y",
   Control: "lb", Alt: "rb",
@@ -589,11 +628,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "/") { e.preventDefault(); focusSearch(); return; }
   const a = KEYS[e.key];
   if (a) { e.preventDefault(); safeInput(a); }
-  if ((e.key === "Tab" || e.key === "Escape") && !layoutHinted) {
-    // Looks like Steam's Desktop layout: X is taken by the on-screen keyboard there.
-    layoutHinted = true;
-    setTimeout(() => toast("Tip: hold the ☰ button for 1 second to switch Steam to its Gamepad layout, so X and B work", 6000), 600);
-  }
+  if (S.steamDeck && (e.key === "Tab" || e.key === "Escape")) showLayoutWarn(true);  // Steam's Desktop layout sends these
 });
 
 els.search.addEventListener("input", () => { S.query = els.search.value; buildView(); select(0, true); });

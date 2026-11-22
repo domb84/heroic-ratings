@@ -63,6 +63,13 @@ header {
   padding: 0.3rem 1rem; background: #122233; font-size: 0.85rem; color: var(--mute);
 }
 #progress[hidden] { display: none; }
+#layoutWarn {
+  padding: 0.4rem 1rem; line-height: 1.6; background: #3a2a0c; color: #ffd27a; font-size: 0.9rem;
+  border-bottom: 1px solid #6b4d14;
+}
+#layoutWarn[hidden] { display: none; }
+#layoutWarn b { color: #ffe3a8; }
+#layoutWarn .btn { vertical-align: middle; margin: 0 0.15rem; }
 #progress .bar { width: 12rem; height: 0.4rem; background: var(--line); border-radius: 1rem; overflow: hidden; }
 #progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
 #progressText { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -77,7 +84,7 @@ main { flex: 1; display: flex; min-height: 0; }
 
 .row {
   display: grid;
-  grid-template-columns: 2.6rem minmax(0, 1fr) 9rem 4.2rem 2.6rem;
+  grid-template-columns: 2.6rem minmax(0, 1fr) 9rem;
   align-items: center; gap: 0.8rem;
   height: 4rem; padding: 0.35rem 0.6rem; margin-bottom: 0.25rem;
   border-radius: 0.5rem; border: 2px solid transparent; cursor: pointer;
@@ -92,14 +99,13 @@ main { flex: 1; display: flex; min-height: 0; }
 .score { text-align: right; line-height: 1.1; }
 .score .pct { font-size: 1.3rem; font-weight: 700; }
 .score .lbl { font-size: 0.68rem; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.revs { text-align: right; color: var(--mute); font-size: 0.85rem; }
 .meta {
   justify-self: end; width: 2.3rem; height: 2.3rem; border-radius: 0.35rem;
   display: grid; place-items: center; font-weight: 700; font-size: 0.95rem; color: #fff;
 }
 .meta.none { background: transparent; color: var(--line); }
 .mc-hi { background: #2e9e44; } .mc-mid { background: #c79a1c; } .mc-lo { background: #c0392b; }
-.c-pos { color: var(--pos); } .c-mix { color: var(--mix); } .c-neg { color: var(--neg); } .c-na { color: var(--line); }
+.c-pos { color: var(--pos); } .c-mix { color: var(--mix); } .c-neg { color: var(--neg); } .c-na { color: var(--line); } .c-plain { color: var(--text, #e6edf3); }
 .empty { color: var(--mute); text-align: center; margin-top: 4rem; font-size: 1.1rem; line-height: 1.6; }
 
 /* ---------- detail ---------- */

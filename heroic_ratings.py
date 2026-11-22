@@ -487,6 +487,23 @@ def is_steam_deck() -> bool:
 STEAM_DECK = is_steam_deck()
 
 
+def desktop_layout_likely(env=os.environ, deck: bool = STEAM_DECK) -> bool:
+    """True when Steam is probably applying its Desktop controller layout to us.
+
+    That happens on a Deck in Desktop Mode when the app wasn't started through
+    Steam. Game Mode (gamescope) and Steam launches (SteamGameId set) give the
+    app a gamepad layout instead.
+    """
+    if not deck:
+        return False
+    game_mode = env.get("XDG_CURRENT_DESKTOP", "").lower() == "gamescope" or "GAMESCOPE_WAYLAND_DISPLAY" in env
+    via_steam = bool(env.get("SteamGameId") or env.get("SteamAppId"))
+    return not game_mode and not via_steam
+
+
+DESKTOP_LAYOUT = desktop_layout_likely()
+
+
 # ------------------------------------------------------------------- app state
 
 class State:
@@ -737,6 +754,7 @@ class State:
                 "progress": dict(self.progress),
                 "heroic_dir": str(self.heroic) if self.heroic else None,
                 "steam_deck": STEAM_DECK,
+                "desktop_layout": DESKTOP_LAYOUT,
                 "games": [self.game_view(g) for g in self.games],
             }
 
