@@ -38,6 +38,22 @@ class Matching(unittest.TestCase):
             self.assertNotIn(" - ", q)
 
 
+class Fallbacks(unittest.TestCase):
+    def test_parse_score(self):
+        self.assertEqual(h._parse_score("83/100"), 83)
+        self.assertEqual(h._parse_score("8.6/10"), 86)
+        self.assertIsNone(h._parse_score("86%"))      # OpenCritic "% recommend", not a score
+        self.assertIsNone(h._parse_score(None))
+
+    def test_extras(self):
+        for t in ["Football Manager 2024 Pre-game editor", "Football Manager 2022 Resource Archiver",
+                  "KillingFloor2Beta", "Chivalry 2 - Public Testing", "Q.U.B.E. 2 Soundtrack",
+                  "Galactic Civilizations III (Test branch)", "Death Stranding Content"]:
+            self.assertTrue(h.EXTRA_RE.search(t), t)
+        for t in ["Football Manager 2024", "Hades", "Alan Wake 2", "Contractor: The Clean Up Part II", "Betrayal"]:
+            self.assertFalse(h.EXTRA_RE.search(t), t)
+
+
 class Library(unittest.TestCase):
     def test_load(self):
         with tempfile.TemporaryDirectory() as d:

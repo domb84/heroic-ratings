@@ -10,14 +10,13 @@ const SORTS = [
   { key: "title", label: "Title", dir: 1, get: g => g.title.toLowerCase() },
 ];
 const STORES = ["All", "Epic", "GOG", "Amazon", "Other"];
-const PHASE_TEXT = { starting: "Reading Heroic library…", matching: "Matching titles on Steam", ratings: "Fetching Steam reviews" };
+const PHASE_TEXT = { starting: "Reading Heroic library…", matching: "Matching titles on Steam", wikidata: "Looking up the rest on Wikidata", ratings: "Fetching Steam reviews" };
 
 // ---------------------------------------------------------------- state
 const S = {
   games: [], view: [], sel: 0, version: -1, progress: {},
   sortIdx: 0, dir: -1, genre: null, store: "All", installedOnly: false, hideUnrated: false, query: "",
   modal: null,
-  swapMenu: "auto", // "auto" | "on" | "off": swap the View/Menu buttons (Steam Deck reports them reversed)
 };
 const $ = id => document.getElementById(id);
 const els = { list: $("list"), detail: $("detail"), search: $("search"), overlay: $("overlay"), modal: $("modal") };
@@ -25,14 +24,14 @@ const els = { list: $("list"), detail: $("detail"), search: $("search"), overlay
 function loadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem("hr-prefs") || "{}");
-    for (const k of ["sortIdx", "dir", "genre", "store", "installedOnly", "hideUnrated", "swapMenu"]) if (k in p) S[k] = p[k];
+    for (const k of ["sortIdx", "dir", "genre", "store", "installedOnly", "hideUnrated"]) if (k in p) S[k] = p[k];
     if (!SORTS[S.sortIdx]) S.sortIdx = 0;
   } catch (e) { /* storage unavailable */ }
 }
 function savePrefs() {
   try {
-    const { sortIdx, dir, genre, store, installedOnly, hideUnrated, swapMenu } = S;
-    localStorage.setItem("hr-prefs", JSON.stringify({ sortIdx, dir, genre, store, installedOnly, hideUnrated, swapMenu }));
+    const { sortIdx, dir, genre, store, installedOnly, hideUnrated } = S;
+    localStorage.setItem("hr-prefs", JSON.stringify({ sortIdx, dir, genre, store, installedOnly, hideUnrated }));
   } catch (e) { /* ignore */ }
 }
 
@@ -50,7 +49,15 @@ function img(url, w) {
   return url;
 }
 
+// What to show in the score slot: Steam user %, else a critic score, else why it's unrated.
+function scoreParts(g) {
+  if (g.percent != null) return { big: g.percent + "%", cls: scoreClass(g.percent), label: g.label };
+  if (g.critic != null) return { big: String(g.critic), cls: scoreClass(g.critic), label: "Critics · " + g.critic_by };
+  return { big: "—", cls: "c-na", label: unratedReason(g) };
+}
+
 function unratedReason(g) {
+  if (g.extra) return "Extra / tool";
   if (!g.matched) return "Fetching…";
   if (!g.appid) return "Not on Steam";
   if (g.percent == null) return g.reviews === 0 ? "No reviews" : "Fetching…";
@@ -71,7 +78,7 @@ function buildView(keepId) {
     (!S.genre || g.genres.includes(S.genre) || g.tags.includes(S.genre)) &&
     (S.store === "All" || g.store === S.store) &&
     (!S.installedOnly || g.installed) &&
-    (!S.hideUnrated || g.percent != null) &&
+    (!S.hideUnrated || g.percent != null || g.critic != null) &&
     (!q || norm(g.title).includes(q) || norm(g.steam_name || "").includes(q)));
   v.sort((a, b) => {
     const x = sort.get(a), y = sort.get(b);
@@ -107,12 +114,12 @@ function rowEl(g) {
 
 function rowHTML(g) {
   const p = g.percent;
-  const reason = unratedReason(g);
+  const sc = scoreParts(g);
   const sub = [g.store, g.installed ? '<span class="inst">● Installed</span>' : "", esc(g.genres.slice(0, 3).join(", "))].filter(Boolean).join(" · ");
   return `<div class="row" data-id="${esc(g.id)}">
     ${g.art ? `<img loading="lazy" decoding="async" src="${esc(img(g.art, 120))}" alt="">` : '<div class="noimg"></div>'}
     <div class="t"><div class="name">${esc(g.title)}</div><div class="sub">${sub}</div></div>
-    <div class="score"><div class="pct ${scoreClass(p)}">${p != null ? p + "%" : "—"}</div><div class="lbl">${esc(p != null ? g.label : reason)}</div></div>
+    <div class="score"><div class="pct ${sc.cls}">${sc.big}</div><div class="lbl">${esc(sc.label)}</div></div>
     <div class="revs">${g.reviews ? fmtN(g.reviews) + "<br>reviews" : ""}</div>
     ${g.metascore ? `<div class="meta ${mcClass(g.metascore)}">${g.metascore}</div>` : '<div class="meta none">–</div>'}
   </div>`;
@@ -161,19 +168,20 @@ function select(i, force) {
 
 function renderDetail(g) {
   const p = g.percent;
-  const reason = unratedReason(g);
+  const sc = scoreParts(g);
   const showSteamName = g.steam_name && norm(g.steam_name) !== norm(g.title);
   const genres = g.genres;
   const others = g.tags.filter(t => !genres.includes(t)).slice(0, 8);
   els.detail.innerHTML = `
     ${g.art ? `<img class="cover" src="${esc(img(g.art, 480))}" alt="">` : ""}
     <h2>${esc(g.title)}</h2>
-    <div class="matched">${g.appid ? (showSteamName ? "Steam match: " + esc(g.steam_name) : "Steam app " + g.appid) + (g.override ? " (manual)" : "") : esc(reason)}</div>
+    <div class="matched">${g.appid ? (showSteamName ? "Steam match: " + esc(g.steam_name) : "Steam app " + g.appid) + (g.via === "wikidata" ? " (found via Wikidata)" : "") + (g.override ? " (manual)" : "") : g.critic != null ? "Not on Steam" : esc(unratedReason(g))}</div>
     <div class="bigscore">
-      <div><div class="pct ${scoreClass(p)}">${p != null ? p + "%" : "—"}</div></div>
-      <div><div class="lbl ${scoreClass(p)}">${esc(p != null ? g.label : reason)}</div>
-        <div class="n">${g.reviews ? g.reviews.toLocaleString() + " Steam reviews" : ""}</div>
-        <div class="n">${g.rating != null ? "Weighted rating " + g.rating.toFixed(1) : ""}</div></div>
+      <div><div class="pct ${sc.cls}">${sc.big}</div></div>
+      <div><div class="lbl ${sc.cls}">${esc(sc.label)}</div>
+        <div class="n">${g.reviews ? g.reviews.toLocaleString() + " Steam reviews" : p == null && g.critic != null ? "Critic average out of 100" : ""}</div>
+        <div class="n">${p != null && g.rating != null ? "Weighted rating " + g.rating.toFixed(1) : ""}</div>
+        <div class="n">${p != null && g.critic != null ? `Critics: ${g.critic} (${esc(g.critic_by)})` : ""}</div></div>
       ${g.metascore ? `<div class="meta ${mcClass(g.metascore)}" title="Metascore">${g.metascore}</div>` : ""}
     </div>
     <div class="facts">${g.year ? `Released <b>${g.year}</b>` : ""}${g.year && g.devs?.length ? " · " : ""}${g.devs?.length ? `<b>${esc(g.devs.slice(0, 2).join(", "))}</b>` : ""}</div>
@@ -192,6 +200,7 @@ async function loadGames() {
   const d = await api("/api/games");
   const keep = S.view[S.sel]?.id;
   S.games = d.games;
+  S.steamDeck = !!d.steam_deck;
   S.version = d.version;
   showProgress(d.progress);
   buildView(keep);
@@ -205,7 +214,7 @@ function showProgress(p) {
   if (busy) {
     const pct = p.total ? (100 * p.done / p.total) : 5;
     $("progressBar").style.width = pct + "%";
-    $("progressText").textContent = `${PHASE_TEXT[p.phase]}${p.total ? ` ${p.done}/${p.total}` : ""}${p.phase === "matching" && p.message ? " — " + p.message : ""}`;
+    $("progressText").textContent = `${PHASE_TEXT[p.phase]}${p.total ? ` ${p.done}/${p.total}` : ""}${(p.phase === "matching" || p.phase === "wikidata") && p.message ? " — " + p.message : ""}`;
   } else if (err) {
     $("progressBar").style.width = "0";
     $("progressText").textContent = "⚠ " + (p.message || "Error") + " (Menu → Refresh to retry)";
@@ -332,8 +341,8 @@ function openMenu() {
       { label: "Store", value: S.store, change: d => { S.store = cycle(storesPresent, S.store, d); refilter(); } },
       { label: "Installed only", value: S.installedOnly ? "On" : "Off", change: () => { S.installedOnly = !S.installedOnly; refilter(); } },
       { label: "Hide unrated games", value: S.hideUnrated ? "On" : "Off", change: () => { S.hideUnrated = !S.hideUnrated; refilter(); } },
-      { label: "Swap Menu / View buttons", value: swapLabel(), change: d => { S.swapMenu = cycle(["auto", "on", "off"], S.swapMenu, d); savePrefs(); } },
       { label: "Search…", activate: () => { closeModal(); focusSearch(); } },
+      { label: "Controller test", activate: () => { closeModal(); openDiag(); } },
       ...(g && g.appid ? [{ label: `Wrong Steam match for “${g.title}”`, activate: () => wrongMatch(g) }] : []),
       { label: "Refresh library & new ratings", activate: () => { api("/api/refresh", {}); closeModal(); toast("Refreshing…"); } },
       { label: "Re-fetch all ratings", activate: () => { api("/api/refresh", { force: true }); closeModal(); toast("Re-fetching everything from Steam…"); } },
@@ -375,7 +384,8 @@ function launchSelected() {
         then choose the install options in Heroic. Keep Heroic running until the download finishes.</div>`,
       onYes: async () => {
         const r = await api("/api/install", { id: g.id });
-        toast(r.ok ? `Opening Heroic to install ${g.title}…` : "Couldn't open Heroic: " + r.error, 6000);
+        if (r.ok) pauseFor(`Installing ${g.title} in Heroic`, "Heroic is opening.");
+        else toast("Couldn't open Heroic: " + r.error, 6000);
       },
     });
     return;
@@ -384,7 +394,8 @@ function launchSelected() {
     kind: "confirm", yes: "Launch", html: `Launch <b>${esc(g.title)}</b>?`,
     onYes: async () => {
       const r = await api("/api/launch", { id: g.id });
-      toast(r.ok ? `Launching ${g.title} via Heroic…` : "Launch failed: " + r.error, 5000);
+      if (r.ok) pauseFor(`Playing ${g.title}`, "Starting via Heroic…");
+      else toast("Launch failed: " + r.error, 5000);
     },
   });
 }
@@ -434,25 +445,12 @@ function input(a) {
 const PAD = { a: 0, b: 1, x: 2, y: 3, lb: 4, rb: 5, lt: 6, rt: 7, select: 8, start: 9, up: 12, down: 13, left: 14, right: 15 };
 const REPEAT = new Set(["up", "down", "left", "right", "lt", "rt"]);
 const held = {};
-// The Steam Deck's own controller reports View (two squares) and Menu (three lines)
-// the other way round from the standard layout, so swap them for Valve pads.
-const isValvePad = p => /28de|valve|steam/i.test(p.id || "");
-function padSwapped(p) {
-  return S.swapMenu === "on" || (S.swapMenu === "auto" && isValvePad(p));
-}
-function swapLabel() {
-  if (S.swapMenu !== "auto") return S.swapMenu === "on" ? "On" : "Off";
-  const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
-  return `Auto (${pads.some(isValvePad) ? "on" : "off"})`;
-}
-function readPads() {
+function readPads(scroll = true) {
   const st = {};
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   for (const p of pads) {
     if (!p || !p.connected) continue;
-    const swap = padSwapped(p);
-    for (const [k, i0] of Object.entries(PAD)) {
-      const i = swap && i0 === 8 ? 9 : swap && i0 === 9 ? 8 : i0;
+    for (const [k, i] of Object.entries(PAD)) {
       const b = p.buttons[i];
       if (b && (b.pressed || b.value > 0.5)) st[k] = true;
     }
@@ -462,7 +460,7 @@ function readPads() {
     if (ax < -0.7) st.left = true;
     if (ax > 0.7) st.right = true;
     const ry = p.axes[3] || 0;  // right stick scrolls the details panel
-    if (Math.abs(ry) > 0.25) els.detail.scrollTop += ry * 14;
+    if (scroll && Math.abs(ry) > 0.25) els.detail.scrollTop += ry * 14;
   }
   return st;
 }
@@ -470,9 +468,85 @@ function readPads() {
 function safeInput(a) {
   try { input(a); } catch (e) { console.error(e); toast("Error: " + e.message, 6000); }
 }
+// ---------------------------------------------------------------- pause while Heroic/a game is in front
+// The Gamepad API keeps reporting buttons even when another window (Heroic, a game)
+// is on top, so we ignore the pad when unfocused, and after launching/installing we
+// pause until the user is back here.
+let paused = null; // { sawBlur, comboStart }
+function pauseFor(title, sub) {
+  paused = { sawBlur: !document.hasFocus(), comboStart: 0 };
+  $("pausedTitle").textContent = title;
+  $("pausedSub").textContent = sub;
+  $("paused").hidden = false;
+}
+function resume() {
+  if (!paused) return;
+  paused = null;
+  $("paused").hidden = true;
+  toast("Controls resumed", 1200);
+}
+window.addEventListener("blur", () => { if (paused) paused.sawBlur = true; });
+window.addEventListener("focus", () => { if (paused && paused.sawBlur) resume(); });
+$("resumeBtn").addEventListener("click", resume);
+
+// Mark currently pressed buttons as "held" so they don't fire once we're active again.
+function swallowHeld(st, now) {
+  for (const k of Object.keys(PAD)) {
+    if (st[k]) held[k] = held[k] || { start: now, next: Infinity };
+    else delete held[k];
+  }
+}
+
+// ---------------------------------------------------------------- controller test screen
+// Shows exactly what the app receives (raw gamepad buttons and keyboard keys), so button
+// mapping problems on a particular setup can be diagnosed. Nothing acts while it's open.
+let diag = null; // { keys: [], holdA: 0, enterDown: 0 }
+function openDiag() {
+  diag = { keys: [], holdA: 0, enterDown: 0 };
+  $("diag").hidden = false;
+}
+function closeDiag() {
+  diag = null;
+  $("diag").hidden = true;
+  swallowHeld(readPads(false), performance.now()); // buttons still held must not act
+}
+$("diagClose").addEventListener("click", closeDiag);
+function renderDiag(now) {
+  const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+  let aDown = false;
+  const lines = [`Window focused: ${document.hasFocus() ? "yes" : "no"}   Steam Deck: ${S.steamDeck ? "yes" : "no"}`, ""];
+  if (!pads.length) lines.push("No gamepads seen (press a button)");
+  pads.forEach((p, n) => {
+    const down = p.buttons.map((b, i) => (b.pressed || b.value > 0.5 ? i : null)).filter(i => i !== null);
+    if (down.includes(0)) aDown = true;
+    const axes = p.axes.map(a => a.toFixed(1)).join(" ");
+    lines.push(`Pad ${n}: ${p.id}`, `  mapping: ${p.mapping || "(none)"}   buttons: ${p.buttons.length}`,
+               `  pressed: ${down.length ? down.join(", ") : "-"}`, `  axes: ${axes}`, "");
+  });
+  lines.push("Keyboard keys received (newest first):", ...(diag.keys.length ? diag.keys : ["-"]));
+  $("diagOut").textContent = lines.join("\n");
+  // Hold A (button 0) for 2 s to close.
+  if (aDown) { diag.holdA = diag.holdA || now; if (now - diag.holdA > 2000) closeDiag(); }
+  else diag.holdA = 0;
+}
+
 function padLoop(now) {
   requestAnimationFrame(padLoop);  // schedule first, so an exception can't stop the loop
-  const st = readPads();
+  if (diag) { renderDiag(now); return; }
+  if (!document.hasFocus()) {      // another window has focus: never act on the pad
+    swallowHeld(readPads(false), now);
+    return;
+  }
+  const st = readPads(!paused);
+  if (paused) {
+    // Manual resume: hold View + Menu together for 1 second.
+    if (st.select && st.start) {
+      paused.comboStart = paused.comboStart || now;
+      if (now - paused.comboStart > 1000) resume();
+    } else paused.comboStart = 0;
+    swallowHeld(st, now);
+    return;
+  }
   for (const k of Object.keys(PAD)) {
     if (st[k]) {
       const h = held[k];
@@ -488,13 +562,26 @@ function padLoop(now) {
   }
 }
 
-// Keyboard (also what Steam Input's keyboard templates send)
+// Keyboard. Steam's Desktop layout for the Deck (controller_base/desktop_neptune.vdf)
+// sends A = Enter, B and Menu = Escape, View = Tab, Y = Space, LB = Ctrl, RB = Alt,
+// back grips = PageDown/PageUp, and keeps X for the on-screen keyboard. Escape opens
+// the menu (or closes whatever is open) because B and Menu can't be told apart.
+let layoutHinted = false;
 const KEYS = {
-  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "a", " ": "a",
-  Escape: "b", Backspace: "b", x: "x", s: "x", y: "y", g: "y", q: "lb", "[": "lb", e: "rb", "]": "rb",
-  PageUp: "lt", PageDown: "rt", r: "select", m: "start", Tab: "start", Home: "home", End: "end",
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "a", " ": "y",
+  Control: "lb", Alt: "rb",
+  Escape: "start", Backspace: "b", x: "x", s: "x", y: "y", g: "y", q: "lb", "[": "lb", e: "rb", "]": "rb",
+  PageUp: "lt", PageDown: "rt", r: "select", m: "start", Tab: "select", Home: "home", End: "end",
 };
 document.addEventListener("keydown", e => {
+  if (diag) {  // controller test: log keys, act on nothing (holding Enter for 2 s closes)
+    e.preventDefault();
+    if (!e.repeat) diag.keys.unshift(`${e.key}  (code ${e.code})`);
+    diag.keys = diag.keys.slice(0, 8);
+    if (e.key === "Enter") { if (!e.repeat) diag.enterDown = Date.now(); else if (Date.now() - diag.enterDown > 2000) closeDiag(); }
+    return;
+  }
+  if (paused) { e.preventDefault(); resume(); return; }  // a key event means this window has focus
   if (document.activeElement === els.search) {
     if (["Escape", "Enter", "ArrowDown", "Tab"].includes(e.key)) { e.preventDefault(); els.search.blur(); }
     return;
@@ -502,6 +589,11 @@ document.addEventListener("keydown", e => {
   if (e.key === "/") { e.preventDefault(); focusSearch(); return; }
   const a = KEYS[e.key];
   if (a) { e.preventDefault(); safeInput(a); }
+  if ((e.key === "Tab" || e.key === "Escape") && !layoutHinted) {
+    // Looks like Steam's Desktop layout: X is taken by the on-screen keyboard there.
+    layoutHinted = true;
+    setTimeout(() => toast("Tip: hold the ☰ button for 1 second to switch Steam to its Gamepad layout, so X and B work", 6000), 600);
+  }
 });
 
 els.search.addEventListener("input", () => { S.query = els.search.value; buildView(); select(0, true); });

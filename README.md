@@ -3,6 +3,7 @@
 Browse your Heroic Games Launcher library (Epic, GOG and Amazon games, plus sideloaded ones) by rating. Built for the Steam Deck: it works in Game Mode, with a controller, at 1280×720/800.
 
 - **Ratings come from Steam, for free and with no API key.** Each game is matched to its Steam page. The app shows the Steam user-review score, a weighted rating (SteamDB-style, so a game with 5 reviews at 100% doesn't beat one with 500k reviews at 96%), and the Metascore.
+- **Wikidata covers the gaps, also free with no API key.** Steam's search only finds games that are currently for sale. For any game it misses, the app asks Wikidata, which finds delisted Steam games (old Football Managers, Rocket League) so they still get their Steam reviews. For games not on Steam at all (Fortnite, Alan Wake 2), Wikidata supplies the Metacritic or OpenCritic critic score, shown as "Critics · OpenCritic".
 - **Genre filter** uses Steam's genre tags.
 - **Sort** by weighted rating, % positive, popularity, Metascore, release year or title.
 - **Filters** for store, installed only, and hiding unrated games.
@@ -68,9 +69,9 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 | Right stick | Scroll the details panel |
 | Menu (three lines) | Store filter, installed only, hide unrated, search, refresh, fix a match, quit |
 
-The Deck's own controller reports the View and Menu buttons the other way round, so the app swaps them automatically for Valve controllers. If they're still reversed, change **Menu → Swap Menu / View buttons** (Auto / On / Off).
+**Desktop Mode:** Steam's Desktop controller layout turns the buttons into keys, and the app maps them: A = Enter, View = Tab, Y = Space, LB / RB = Ctrl / Alt. But B and Menu both send Escape (the app treats it as Menu), and X opens Steam's on-screen keyboard, which takes focus away from the app. For full controller support, **hold the Menu (three lines) button for a second** to switch Steam to its Gamepad layout, or launch the app through Steam as a Non-Steam Game. If a button ever does the wrong thing, **Menu → Controller test** shows exactly what the app receives.
 
-To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter, Esc, `x`, `y`, `[` `]`, `r`, `m`, and `/` for search. Mouse and touch also work.
+To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, and `/` for search. Mouse and touch also work.
 
 ## Installing games
 
@@ -80,7 +81,9 @@ Press **A** on a game that isn't installed and confirm. Heroic opens and asks *"
 
 ## Wrong or missing matches
 
-The details panel shows which Steam game each title was matched to. Games that aren't sold on Steam can't get a rating; examples are Epic exclusives like Fortnite and Alan Wake 2, and GOG-only releases. They show as "Not on Steam" and are always sorted to the bottom.
+The details panel shows which Steam game each title was matched to, and notes when the match was found through Wikidata. Games that aren't sold on Steam get a critic score when Wikidata has one; that score is used for sorting by Rating. Games with no data show as "Not on Steam". Editors, betas, soundtracks and similar library entries show as "Extra / tool" and aren't looked up. Both groups are always sorted to the bottom.
+
+Wikidata limits how fast it can be queried, so the first sync takes a little longer: about 2–3 seconds per game Steam couldn't find.
 
 - **Remove a bad match:** Menu → *Wrong Steam match for "…"*.
 - **Set the right match:** edit `data/overrides.json`. The key is the game's ID (`runner:app_name`) and the value is the Steam app ID, or `null` for no match. Then choose Menu → *Refresh*.

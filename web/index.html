@@ -37,6 +37,26 @@
 </footer>
 
 <div id="overlay" hidden><div class="modal" id="modal"></div></div>
+<div id="paused" hidden>
+  <div class="pbox">
+    <div class="ptitle" id="pausedTitle"></div>
+    <div class="psub" id="pausedSub"></div>
+    <p>Controls are paused here so they don't affect Heroic or your game.
+       They come back on their own when you return to this screen.</p>
+    <button id="resumeBtn" type="button">Resume</button>
+    <div class="phint">or hold <span class="btn glyph"><svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="7.5" height="6" rx="1"/><rect x="6" y="7" width="7.5" height="6" rx="1"/></svg></span>
+      + <span class="btn glyph"><svg viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h10"/></svg></span> for 1 second</div>
+  </div>
+</div>
+<div id="diag" hidden>
+  <div class="pbox">
+    <div class="ptitle">Controller test</div>
+    <div class="psub">Press each button and note what appears below</div>
+    <pre id="diagOut"></pre>
+    <button id="diagClose" type="button">Close</button>
+    <div class="phint">or hold A for 2 seconds</div>
+  </div>
+</div>
 <div id="toast" hidden></div>
 
 <script src="app.js"></script>

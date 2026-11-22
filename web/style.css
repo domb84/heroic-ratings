@@ -177,3 +177,23 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 
 /* Skip layout/paint work for rows that are off screen (big win with 500+ games) */
 .row { content-visibility: auto; contain-intrinsic-size: auto 4.25rem; }
+
+/* "Controls paused" screen shown while Heroic or a game is in front */
+#paused { position: fixed; inset: 0; z-index: 30; background: #000c; display: grid; place-items: center; }
+#paused[hidden] { display: none; }
+#paused .pbox { background: var(--panel); border: 1px solid var(--line); border-radius: 0.8rem; padding: 1.6rem 2rem; width: min(34rem, 92vw); text-align: center; }
+#paused .ptitle { font-size: 1.35rem; font-weight: 700; }
+#paused .psub { color: var(--mute); margin-top: 0.3rem; }
+#paused p { color: #c3d0dc; line-height: 1.45; font-size: 0.95rem; margin: 1rem 0 1.2rem; }
+#resumeBtn { font: inherit; font-size: 1.1rem; font-weight: 700; padding: 0.7rem 2.6rem; border-radius: 0.6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+#paused .phint { margin-top: 0.9rem; color: var(--mute); font-size: 0.85rem; display: flex; gap: 0.35rem; justify-content: center; align-items: center; }
+
+/* Controller test screen */
+#diag { position: fixed; inset: 0; z-index: 40; background: #000d; display: grid; place-items: center; }
+#diag[hidden] { display: none; }
+#diag .pbox { background: var(--panel); border: 1px solid var(--line); border-radius: 0.8rem; padding: 1.2rem 1.6rem; width: min(52rem, 94vw); text-align: center; }
+#diag .ptitle { font-size: 1.3rem; font-weight: 700; }
+#diag .psub { color: var(--mute); margin-top: 0.2rem; }
+#diagOut { text-align: left; background: var(--bg); border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.8rem 1rem; margin: 0.9rem 0; font-size: 0.85rem; line-height: 1.4; max-height: 60vh; overflow: auto; white-space: pre-wrap; user-select: text; }
+#diagClose { font: inherit; font-weight: 700; padding: 0.6rem 2.2rem; border-radius: 0.6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+#diag .phint { margin-top: 0.7rem; color: var(--mute); font-size: 0.85rem; }

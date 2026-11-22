@@ -217,7 +217,7 @@ EDITION_RE = re.compile(
 )
 TRAIL_RE = re.compile(
     r"\s+(?:goty|game of the year|remastered|remaster|enhanced|legacy|redux|complete|definitive|"
-    r"\d+ year celebration|pc|windows|epic games store|epic edition|hd)$")
+    r"\d+ year celebration|starter access|pc|windows|epic games store|epic edition|hd)$")
 # A subtitle that only names an edition, e.g. "X: Spacer's Choice Edition", "X - 20 Year Celebration".
 SUBTITLE_SPLIT = re.compile(r"\s*(?::|\s[-–—]\s)\s*")
 EDITIONISH = re.compile(r"\b(?:edition|celebration|cut|remaster(?:ed)?|collection|goty|game of the year|"
@@ -308,8 +308,9 @@ def search_queries(title: str) -> list[str]:
 class Steam:
     """Tiny throttled client for Steam's public (key-less) store endpoints."""
 
-    def __init__(self, min_interval=0.3):
+    def __init__(self, min_interval=0.3, name="Steam"):
         self.min_interval = min_interval
+        self.name = name
         self._last = 0.0
         self._lock = threading.Lock()
 
@@ -328,7 +329,10 @@ class Steam:
             except urllib.error.HTTPError as e:
                 if e.code in (429, 500, 502, 503, 504):
                     delay = min(90, 5 * 2 ** attempt)
-                    log(f"Steam HTTP {e.code}, backing off {delay}s")
+                    ra = (e.headers or {}).get("Retry-After", "")
+                    if ra.isdigit():  # the server says exactly how long to wait
+                        delay = min(120, int(ra) + 1)
+                    log(f"{self.name} HTTP {e.code}, backing off {delay}s")
                     time.sleep(delay)
                     continue
                 raise
@@ -336,7 +340,7 @@ class Steam:
                 delay = 3 * (attempt + 1)
                 log(f"network error ({e}), retrying in {delay}s")
                 time.sleep(delay)
-        raise RuntimeError("Steam request failed repeatedly: " + url)
+        raise RuntimeError(f"{self.name} request failed repeatedly: " + url)
 
     def search(self, term: str) -> list[dict]:
         d = self.get("https://store.steampowered.com/api/storesearch/",
@@ -376,10 +380,111 @@ def best_match(steam: Steam, title: str):
     return best
 
 
+# ------------------------------------------------------------------- Wikidata fallback
+# Steam's store search only finds games that are currently for sale, so delisted games
+# (old Football Managers, Rocket League, ...) never match. Wikidata (free, no key) maps
+# game names to Steam app IDs, delisted or not, and carries Metacritic/OpenCritic scores
+# for games that aren't on Steam at all (Epic exclusives).
+
+WD_API = "https://www.wikidata.org/w/api.php"
+WD_VIDEO_GAME = "Q7889"
+WD_CRITICS = {"Q150248": "Metacritic", "Q21039459": "OpenCritic"}
+WD_PC = {"Q1406", "Q16338"}  # Microsoft Windows, personal computer
+# Library entries that are tools/extras rather than games: don't look them up.
+EXTRA_RE = re.compile(r"(?i)\b(?:editor|archiver|test(?:ing)? branch|public test(?:ing)?|playtest|"
+                      r"soundtrack|ost|tech test|dedicated server|sdk|benchmark|browser|content)\b|beta\b")
+
+
+def _wd_value(claim):
+    return (claim.get("mainsnak") or {}).get("datavalue", {}).get("value")
+
+
+def _wd_qualifier_ids(claim, prop):
+    return {(q.get("datavalue") or {}).get("value", {}).get("id")
+            for q in (claim.get("qualifiers") or {}).get(prop, [])}
+
+
+def _parse_score(v) -> int | None:
+    m = re.fullmatch(r"\s*([\d.]+)\s*/\s*(100|10)\s*", str(v or ""))
+    if not m:
+        return None
+    x = float(m.group(1)) * 100 / int(m.group(2))
+    return round(x) if 0 < x <= 100 else None
+
+
+class Wikidata:
+    def __init__(self):
+        self.http = Steam(min_interval=1.5, name="Wikidata")  # Wikidata rate-limits fast clients
+
+    def _is_game(self, claims) -> bool:
+        p31 = {(_wd_value(c) or {}).get("id") for c in claims.get("P31", [])}
+        has_oc = any("Q21039459" in _wd_qualifier_ids(c, "P447") for c in claims.get("P444", []))
+        return WD_VIDEO_GAME in p31 or "P1733" in claims or has_oc
+
+    def lookup(self, title: str) -> dict | None:
+        best = None
+        for q in search_queries(title)[:2]:
+            res = self.http.get(WD_API, {"action": "wbsearchentities", "search": q, "language": "en",
+                                         "type": "item", "limit": 7, "format": "json"})
+            hits = res.get("search", [])
+            ids = [s["id"] for s in hits]
+            if not ids:
+                continue
+            # Names the search matched on (covers language-neutral "mul" labels too).
+            found = {s["id"]: [s.get("label", ""), (s.get("match") or {}).get("text", "")] for s in hits}
+            ents = self.http.get(WD_API, {"action": "wbgetentities", "ids": "|".join(ids),
+                                          "props": "claims|labels|aliases", "languages": "en|mul",
+                                          "format": "json"}).get("entities", {})
+            for qid in ids:
+                e = ents.get(qid) or {}
+                claims = e.get("claims") or {}
+                if not self._is_game(claims):
+                    continue
+                labels = e.get("labels") or {}
+                label = (labels.get("en") or labels.get("mul") or {}).get("value", "") or found[qid][0]
+                aliases = e.get("aliases") or {}
+                names = [label, *found[qid]] + [a["value"] for lang in ("en", "mul") for a in aliases.get(lang, [])]
+                sim = max((similarity(title, n) for n in names if n), default=0.0)
+                if sim >= MATCH_THRESHOLD and (best is None or sim > best[0]):
+                    best = (sim, qid, label or title, claims)
+            if best:
+                break
+        if not best:
+            return None
+        sim, qid, name, claims = best
+        steam = [int(v) for c in claims.get("P1733", []) if str(v := _wd_value(c)).isdigit()]
+        critics = {}  # source -> (score, priority); prefer PC scores, then platform-less ones
+        for c in claims.get("P444", []):
+            score = _parse_score(_wd_value(c))
+            src = next((WD_CRITICS[b] for b in _wd_qualifier_ids(c, "P447") if b in WD_CRITICS), None)
+            if score is None or not src:
+                continue
+            plats = _wd_qualifier_ids(c, "P400")
+            prio = 0 if plats & WD_PC else 1 if not plats else 2
+            if src not in critics or prio < critics[src][1]:
+                critics[src] = (score, prio)
+        critic = next(({"score": critics[s][0], "by": s} for s in ("Metacritic", "OpenCritic") if s in critics), None)
+        return {"qid": qid, "name": name, "sim": round(sim, 3), "steam": steam[0] if steam else None,
+                "critic": critic, "metacritic": critics["Metacritic"][0] if "Metacritic" in critics else None}
+
+
 def weighted_rating(percent: float, count: int) -> float:
     """SteamDB-style rating: pulls low-review-count games toward 50%."""
     avg = percent / 100.0
     return 100.0 * (avg - (avg - 0.5) * 2 ** (-math.log10(count + 1)))
+
+
+def is_steam_deck() -> bool:
+    """True on Steam Deck hardware (LCD "Jupiter" / OLED "Galileo")."""
+    try:
+        vendor = Path("/sys/class/dmi/id/sys_vendor").read_text().strip()
+        product = Path("/sys/class/dmi/id/product_name").read_text().strip()
+    except OSError:
+        return False
+    return vendor == "Valve" and product in ("Jupiter", "Galileo")
+
+
+STEAM_DECK = is_steam_deck()
 
 
 # ------------------------------------------------------------------- app state
@@ -389,6 +494,7 @@ class State:
         self.heroic_arg = heroic_dir
         self.lock = threading.RLock()
         self.steam = Steam()
+        self.wikidata = Wikidata()
         self.cache = read_json(CACHE_FILE, {}) or {}
         self.cache.setdefault("matches", {})
         self.cache.setdefault("steam", {})
@@ -452,7 +558,7 @@ class State:
             self._lib_sig = sig
             return
         # While a sync runs, leave the old signature so the change is picked up afterwards.
-        if sig == prev or self.progress.get("phase") in ("starting", "matching", "ratings"):
+        if sig == prev or self.progress.get("phase") in ("starting", "matching", "wikidata", "ratings"):
             return
         self._lib_sig = sig
         log("Heroic library changed on disk, reloading")
@@ -500,6 +606,30 @@ class State:
             matches[g["id"]] = {"title": g["title"], "appid": appid, "name": name,
                                 "score": round(score, 3), "metascore": meta, "t": now}
             if i % 20 == 19:
+                self.save()
+        self.save()
+
+        # 1b. not found by Steam search: try Wikidata (delisted Steam games, critic scores)
+        wd_todo = [g for g in self.games
+                   if (m := matches.get(g["id"])) and not m.get("appid") and not m.get("override")
+                   and not EXTRA_RE.search(g["title"])
+                   and (force or now - m.get("wd_t", 0) > NOMATCH_RETRY_SECS)]
+        for i, g in enumerate(wd_todo):
+            self.set_progress("wikidata", i, len(wd_todo), g["title"])
+            try:
+                r = self.wikidata.lookup(g["title"])
+            except Exception as e:  # optional source: skip it for now, retry next sync
+                log("Wikidata lookup failed:", g["title"], e)
+                break
+            m = matches[g["id"]]
+            m["wd_t"] = now
+            if r:
+                m.update({"wd": r["qid"], "wd_name": r["name"], "critic": r["critic"]})
+                if r["steam"]:
+                    m.update({"appid": r["steam"], "name": r["name"], "score": r["sim"], "via": "wikidata"})
+                if r["metacritic"] and not m.get("metascore"):
+                    m["metascore"] = r["metacritic"]
+            if i % 10 == 9:
                 self.save()
         self.save()
 
@@ -587,6 +717,13 @@ class State:
             })
             if not out["steam_name"]:
                 out["steam_name"] = s.get("name", "")
+        crit = m.get("critic")
+        if crit:
+            out["critic"], out["critic_by"] = crit["score"], crit["by"]
+            if out.get("rating") is None:  # no Steam user reviews: rank by the critic score
+                out["rating"] = float(crit["score"])
+        out["via"] = m.get("via")
+        out["extra"] = bool(EXTRA_RE.search(g["title"]))
         if not out.get("art") and appid:
             out["art"] = f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"
         out.setdefault("genres", [])
@@ -599,6 +736,7 @@ class State:
                 "version": self.version,
                 "progress": dict(self.progress),
                 "heroic_dir": str(self.heroic) if self.heroic else None,
+                "steam_deck": STEAM_DECK,
                 "games": [self.game_view(g) for g in self.games],
             }
 
