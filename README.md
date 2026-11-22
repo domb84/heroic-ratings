@@ -7,7 +7,7 @@ Browse your Heroic Games Launcher library (Epic, GOG and Amazon games, plus side
 - **Genre filter** uses Steam's genre tags.
 - **Sort** by weighted rating, % positive, popularity, Metascore, release year or title. The list shows the value you're sorting by; the details panel shows them all.
 - **Filters** for store, installed only, and hiding unrated games.
-- **Launch** installed games straight from the list. The app hands them to Heroic.
+- **Launch** installed games straight from the list, through Steam, so a game keeps running when you close this app.
 - **Self-contained:** the app runs in its own window and brings its own Python, so it doesn't need a browser or the system Python. Everything, including your cache, lives in this folder.
 
 ## Set up (once)
@@ -73,16 +73,49 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 
 To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, and `/` for search. Mouse and touch also work.
 
+## The "Heroic (Debug)" Steam shortcut
+
+On first start, the app adds a hidden non-Steam shortcut called **Heroic (Debug)** to Steam. It starts Heroic in the background, with no window (`--no-gui`), and with its remote-debugging port (`127.0.0.1` only), and the app will use it to start Heroic for installs and launches. That way Heroic, and the games it runs, belong to their own Steam entry instead of running inside this app, so closing this app doesn't close your game.
+
+Steam only reads its shortcuts when it starts, so **restart Steam once** after the app adds it, or updates it after an app update changes the shortcut (Game Mode: Steam button → Power → Restart Steam). The app backs up `shortcuts.vdf` before changing it (`shortcuts.vdf.heroic-ratings-<date>.bak` next to it), and **Menu → Heroic (Debug) Steam shortcut** shows its status. The shortcut is under Steam's Hidden collection if you want to see it.
+
+## Launching games
+
+Press **A** on an installed game and confirm. The game always runs as its own Steam app, never inside this one, so closing Heroic Ratings doesn't close it:
+
+1. **The game's own Steam shortcut** (Heroic adds one when it installs a game) is used if Steam has loaded it.
+2. **Otherwise, through Heroic (Debug):** the app starts it via Steam if it isn't running yet, then hands it the launch. A shortcut Heroic added since Steam last started counts as not loaded, so newly installed games take this route until the next Steam restart.
+
 ## Installing games
 
-Press **A** on a game that isn't installed and confirm. The app opens Heroic on that game's page and presses **Install** there, so Heroic's normal install dialog appears (folder, DLC, language, etc.). The app then minimises itself so Heroic is visible; switch back to it any time and it returns to fullscreen. When the download finishes, the game shows as Installed here within a few seconds.
+Press **A** on a game that isn't installed and confirm. The app starts Heroic through the **Heroic (Debug)** shortcut if it isn't running, reads the same options Heroic's install dialog offers, and shows them here. Use ◀ ▶ to change a value and **A** to toggle or select. Only the options a game actually has are shown:
 
-**Why it works this way:** Heroic 2.22.4 can't take install requests from other apps. Its *"…is not installed, do you wish to install it?"* prompt appears, but its Yes button does nothing ([Heroic issue #6053](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/issues/6053)). As a workaround, the app starts Heroic with Chromium's remote-debugging port (on a free port picked at start-up, `127.0.0.1` only) and uses it to navigate Heroic's own window. Heroic still does all the downloading and installing.
+| Option | Notes |
+| --- | --- |
+| Install location | Heroic's default folder, plus any SD card or USB drive (`<card>/Games/Heroic`), with free space |
+| Platform | Windows or Linux, when the game has a native Linux build. Changing it reloads the options |
+| Language | Mostly GOG games. Defaults to your system language, as Heroic does |
+| Wine / Proton | Windows games only. Starts on the game's current setting; saved to the game's Heroic settings before installing |
+| Wine prefix | Windows games only. **Own** by default (`<Heroic prefix folder>/<game title>`, named the way Heroic names them), or Heroic's **shared** prefix. A game that already has its own prefix keeps it |
+| DLC | All owned DLC is selected by default, as in Heroic |
+| Optional components | Epic games with selective downloads |
 
-- **Heroic must be closed first.** The debug port can only be turned on when Heroic starts. If Heroic is already open, the app asks you to quit it (Desktop Mode: tray icon → Quit).
-- **While Heroic runs this way**, any program on the device could control it through that port, including your logged-in stores. It's off again the next time Heroic starts normally. Set `HEROIC_RATINGS_HEROIC_DEBUG_PORT` to use a different port.
+The download and install size update as you change things. **Install** is blocked if the game won't fit at the chosen location. The install is then queued in Heroic's own download queue, and its progress shows on the game's row and in the details panel (percent, speed, time left). Because Heroic runs as its own Steam app, the download carries on if you close this app. When it finishes, the game shows as Installed.
 
-**In Game Mode, if Heroic wasn't already running, it runs as part of this app.** Closing Heroic Ratings with *Exit game* would then also stop the download. Leave the app open until the download finishes.
+**Why it works this way:** Heroic 2.22.4 can't take install requests from other apps. Its *"…is not installed, do you wish to install it?"* prompt appears, but its Yes button does nothing ([Heroic issue #6053](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/issues/6053)). As a workaround, Heroic (Debug) starts Heroic with Chromium's remote-debugging port (a free port Heroic picks, `127.0.0.1` only), and the app uses it to navigate Heroic's own window. Heroic still does all the downloading and installing.
+
+## Uninstalling games
+
+Choose **Menu → Uninstall "…"** with an installed game selected. You get the same choices as Heroic's own uninstall dialog, both off by default:
+
+- **Remove Wine prefix** (Windows games): deletes the game's Wine prefix, including any save files in it that aren't backed up. Not offered when the game uses Heroic's shared prefix.
+- **Erase settings and log**: forgets the game's Heroic settings and deletes its log.
+
+Heroic does the uninstall; the game's row shows "Uninstalling…" until it's done.
+
+## When Heroic is already open
+
+Launches and installs need Heroic to be running from **Heroic (Debug)**. If Heroic is open some other way (your normal Heroic shortcut, or the desktop app), the app asks you to quit it first (Desktop Mode: tray icon → Quit; Game Mode: Steam button → Heroic → Exit game). While Heroic runs from Heroic (Debug), any program on the device could control it through the debug port, including your logged-in stores; the port is gone once Heroic is started normally again.
 
 ## Wrong or missing matches
 
@@ -108,7 +141,7 @@ python3 heroic_ratings.py [--port 8787] [--heroic-dir PATH] [--kiosk] [--no-sync
 | `HEROIC_RATINGS_DATA` | Where the cache is stored (default `./data`; the AppImage uses `~/.local/share/heroic-ratings`) |
 | `HEROIC_RATINGS_BROWSER` | Browser command for `--kiosk` |
 | `HEROIC_LAUNCH_CMD` | Custom launch command; `{url}` is replaced with the `heroic://launch?...` URL (installs then use the plain `heroic://launch` prompt too) |
-| `HEROIC_RATINGS_HEROIC_DEBUG_PORT` | Fixed port for the install workaround (default: a free port Heroic picks) |
+| `HEROIC_RATINGS_STEAM_USERDATA` | Steam `userdata` folder to use for the shortcut (for testing) |
 
 The app finds the Heroic folder automatically for both the Flatpak install (`~/.var/app/com.heroicgameslauncher.hgl/config/heroic`) and the native one (`~/.config/heroic`).
 

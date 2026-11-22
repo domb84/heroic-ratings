@@ -77,8 +77,41 @@ class Library(unittest.TestCase):
     def test_debug_socket_is_local_only(self):
         with self.assertRaises(OSError):
             h._MiniWebSocket("ws://192.168.1.5:47317/devtools/page/x")
-        cmd = h.heroic_debug_command.__code__.co_consts
-        self.assertTrue(any("--remote-debugging-address=127.0.0.1" == c for c in cmd))
+        self.assertIn("--remote-debugging-address=127.0.0.1", h.HEROIC_DEBUG_ARGS)
+
+    def test_game_shortcut_url_parsing(self):
+        e = {"exe": "flatpak", "LaunchOptions": 'run com.heroicgameslauncher.hgl --no-gui "heroic://launch?appName=Eel&runner=legendary"'}
+        self.assertEqual(h._shortcut_game(e), ("legendary", "Eel"))
+        self.assertEqual(h._shortcut_game({"exe": "x", "LaunchOptions": "heroic://launch/gog/1207658924"}), ("gog", "1207658924"))
+        self.assertIsNone(h._shortcut_game({"exe": "flatpak", "LaunchOptions": "run com.heroicgameslauncher.hgl"}))
+
+    def test_debug_shortcut_added_once_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d, "userdata/1/config"); cfg.mkdir(parents=True)
+            other = {"appid": ("int", 123), "AppName": "Other", "LaunchOptions": "x", "tags": {"0": "fav"}}
+            original = h.vdf_dump({"shortcuts": {"0": other}})
+            (cfg / "shortcuts.vdf").write_bytes(original)
+            self.assertEqual(h.vdf_dump(h.vdf_load(original)), original)
+            saved = (h.STEAM_USERDATA, h.SHORTCUT_STATE_FILE, h.heroic_shortcut_target)
+            h.STEAM_USERDATA, h.SHORTCUT_STATE_FILE = [Path(d, "userdata")], Path(d, "state.json")
+            h.heroic_shortcut_target = lambda: ('"/usr/bin/flatpak"', "/usr/bin/", "run x " + h.HEROIC_DEBUG_ARGS)
+            try:
+                self.assertEqual(len(h.add_debug_shortcut()["changed"]), 1)
+                self.assertEqual(h.add_debug_shortcut()["changed"], [])
+                root = h.vdf_load((cfg / "shortcuts.vdf").read_bytes())
+                self.assertEqual(root["shortcuts"]["0"], other)
+                new = h.find_debug_shortcut(root)
+                self.assertEqual(new["IsHidden"], ("int", 1))
+                self.assertIn("--remote-debugging-address=127.0.0.1", new["LaunchOptions"])
+                self.assertEqual(len(list(cfg.glob("*.bak"))), 1)
+                # a newer app version with different options updates the same entry
+                h.heroic_shortcut_target = lambda: ('"/usr/bin/flatpak"', "/usr/bin/", "run x --no-gui " + h.HEROIC_DEBUG_ARGS)
+                self.assertEqual(len(h.add_debug_shortcut()["changed"]), 1)
+                updated = h.find_debug_shortcut(h.vdf_load((cfg / "shortcuts.vdf").read_bytes()))
+                self.assertEqual(updated["appid"], new["appid"])
+                self.assertIn("--no-gui", updated["LaunchOptions"])
+            finally:
+                h.STEAM_USERDATA, h.SHORTCUT_STATE_FILE, h.heroic_shortcut_target = saved
 
     def test_desktop_layout_detection(self):
         f = h.desktop_layout_likely

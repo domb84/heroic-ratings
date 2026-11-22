@@ -789,6 +789,291 @@ def spawn_detached(cmd: list[str]):
                      stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+# ------------------------------------------------------------------- our Steam shortcut for Heroic
+#
+# In Game Mode, Steam treats everything started under our shortcut as one game:
+# a game launched through a Heroic that we started runs inside our app and dies
+# with it. So the app adds its own hidden non-Steam shortcut, "Heroic (Debug)",
+# which starts Heroic with its debug port, and uses it for all installs and
+# launches. Steam reads shortcuts.vdf only when it starts, so after adding the
+# shortcut Steam needs one restart.
+
+STEAM_USERDATA = ([Path(os.environ["HEROIC_RATINGS_STEAM_USERDATA"])] if os.environ.get("HEROIC_RATINGS_STEAM_USERDATA")
+                  else [HOME / ".local/share/Steam/userdata", HOME / ".steam/steam/userdata"])
+DEBUG_SHORTCUT_NAME = "Heroic (Debug)"
+# --no-gui: Heroic starts with its window hidden (it still loads, so the debug port works),
+# so it doesn't pop up in front of this app.
+HEROIC_DEBUG_ARGS = "--no-gui --no-sandbox --remote-debugging-port=0 --remote-debugging-address=127.0.0.1"
+SHORTCUT_STATE_FILE = DATA_DIR / "steam-shortcut.json"
+
+
+def vdf_load(data: bytes) -> dict:
+    """Parse Steam's binary VDF (shortcuts.vdf). Keeps key order and value types."""
+    pos = 0
+
+    def cstr() -> str:
+        nonlocal pos
+        end = data.index(b"\0", pos)
+        s = data[pos:end].decode("utf-8", "surrogateescape")
+        pos = end + 1
+        return s
+
+    def node() -> dict:
+        nonlocal pos
+        out = {}
+        while True:
+            t = data[pos]
+            pos += 1
+            if t == 0x08:
+                return out
+            k = cstr()
+            if t == 0x00:
+                out[k] = node()
+            elif t == 0x01:
+                out[k] = cstr()
+            elif t == 0x02:
+                out[k] = ("int", int.from_bytes(data[pos:pos + 4], "little"))
+                pos += 4
+            else:
+                raise ValueError(f"unsupported VDF type {t:#x}")
+
+    return node()
+
+
+def vdf_dump(obj: dict) -> bytes:
+    out = bytearray()
+    for k, v in obj.items():
+        kb = k.encode("utf-8", "surrogateescape") + b"\0"
+        if isinstance(v, dict):
+            out += b"\x00" + kb + vdf_dump(v)
+        elif isinstance(v, tuple):
+            out += b"\x02" + kb + v[1].to_bytes(4, "little")
+        else:
+            out += b"\x01" + kb + v.encode("utf-8", "surrogateescape") + b"\0"
+    return bytes(out) + b"\x08"
+
+
+def _field(entry: dict, name: str):
+    for k, v in entry.items():
+        if k.lower() == name.lower():
+            return v
+    return None
+
+
+def shortcut_files() -> list[Path]:
+    """Each Steam user's shortcuts.vdf (deduplicated: ~/.steam/steam usually links to ~/.local/share/Steam)."""
+    files, seen = [], set()
+    for root in STEAM_USERDATA:
+        for cfg in sorted(root.glob("*/config")):
+            f = cfg / "shortcuts.vdf"
+            if cfg.resolve() not in seen:
+                seen.add(cfg.resolve())
+                files.append(f)
+    return files
+
+
+def find_debug_shortcut(root: dict) -> dict | None:
+    for entry in root.get("shortcuts", {}).values():
+        if isinstance(entry, dict) and (_field(entry, "AppName") or "") == DEBUG_SHORTCUT_NAME:
+            return entry
+    return None
+
+
+def heroic_shortcut_target() -> tuple[str, str, str]:
+    """(exe, start dir, launch options) that start Heroic with its debug port."""
+    if shutil.which("flatpak") and (HOME / ".var/app" / HEROIC_FLATPAK_ID).is_dir():
+        flatpak = shutil.which("flatpak")
+        return f'"{flatpak}"', str(Path(flatpak).parent) + "/", f"run {HEROIC_FLATPAK_ID} {HEROIC_DEBUG_ARGS}"
+    heroic = shutil.which("heroic")
+    if heroic:
+        return f'"{heroic}"', str(Path(heroic).parent) + "/", HEROIC_DEBUG_ARGS
+    raise OSError("Heroic isn't installed (neither the Flatpak nor a 'heroic' command was found)")
+
+
+def shortcut_appid(exe: str, name: str) -> int:
+    """The ID Steam itself gives a non-Steam shortcut."""
+    import zlib
+    return zlib.crc32((exe + name).encode()) | 0x80000000
+
+
+def new_shortcut_entry(exe: str, start_dir: str, options: str) -> dict:
+    # Same fields, order and key spelling as the shortcuts Steam writes itself.
+    return {
+        "appid": ("int", shortcut_appid(exe, DEBUG_SHORTCUT_NAME)), "appname": DEBUG_SHORTCUT_NAME,
+        "exe": exe, "StartDir": start_dir, "icon": "", "ShortcutPath": "", "LaunchOptions": options,
+        "IsHidden": ("int", 1), "AllowDesktopConfig": ("int", 1), "AllowOverlay": ("int", 1),
+        "OpenVR": ("int", 0), "Devkit": ("int", 0), "DevkitGameID": "", "DevkitOverrideAppID": ("int", 0),
+        "LastPlayTime": ("int", 0), "FlatpakAppID": "", "sortas": "", "tags": {},
+    }
+
+
+def steam_start_time() -> float | None:
+    """When the running Steam client started (epoch seconds), or None if it isn't running."""
+    try:
+        btime = next(float(l.split()[1]) for l in open("/proc/stat") if l.startswith("btime"))
+        tick = os.sysconf("SC_CLK_TCK")
+    except (OSError, StopIteration, ValueError):
+        return None
+    starts = []
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if (d / "comm").read_text().strip() != "steam":
+                continue
+            stat = (d / "stat").read_text()
+            starts.append(btime + int(stat.rsplit(")", 1)[1].split()[19]) / tick)
+        except (OSError, ValueError, IndexError):
+            continue
+    return min(starts) if starts else None
+
+
+def _load_shortcut_state() -> dict:
+    try:
+        return json.loads(SHORTCUT_STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def debug_shortcut_status() -> dict:
+    """{"state": "missing" | "restart" | "ready" | "no-steam", "gameid", ...}"""
+    files = shortcut_files()
+    if not files:
+        return {"state": "no-steam", "error": "No Steam user folder found"}
+    entry = None
+    for f in files:
+        try:
+            entry = find_debug_shortcut(vdf_load(f.read_bytes())) if f.exists() else None
+        except (OSError, ValueError, IndexError):
+            entry = None
+        if entry:
+            break
+    if not entry:
+        return {"state": "missing"}
+    try:
+        exe, _, options = heroic_shortcut_target()
+        if (_field(entry, "Exe"), _field(entry, "LaunchOptions")) != (exe, options):
+            return {"state": "outdated"}       # made by an older version of this app
+    except OSError:
+        pass
+    gameid = shortcut_gameid(entry)
+    added = _load_shortcut_state().get("added_at")
+    started = steam_start_time()
+    # Added by us after the running Steam started -> Steam hasn't loaded it yet.
+    if added and started and started < added:
+        return {"state": "restart", "gameid": gameid}
+    return {"state": "ready", "gameid": gameid}
+
+
+def add_debug_shortcut() -> dict:
+    """Add the hidden "Heroic (Debug)" shortcut to every Steam user that lacks it, or bring
+    an existing one up to date (same entry and ID, just its command)."""
+    exe, start_dir, options = heroic_shortcut_target()
+    changed = []
+    for f in shortcut_files():
+        data = f.read_bytes() if f.exists() else b"\x00shortcuts\x00\x08\x08"
+        root = vdf_load(data)
+        entry = find_debug_shortcut(root)
+        if entry:
+            if (_field(entry, "Exe"), _field(entry, "LaunchOptions")) == (exe, options):
+                continue
+            for k in list(entry):
+                if k.lower() == "exe":
+                    entry[k] = exe
+                elif k.lower() == "startdir":
+                    entry[k] = start_dir
+                elif k.lower() == "launchoptions":
+                    entry[k] = options
+        else:
+            shortcuts = root.setdefault("shortcuts", {})
+            index = max((int(k) for k in shortcuts if k.isdigit()), default=-1) + 1
+            shortcuts[str(index)] = new_shortcut_entry(exe, start_dir, options)
+        new = vdf_dump(root)
+        if find_debug_shortcut(vdf_load(new)) is None:   # must parse back with our entry in it
+            raise ValueError("shortcuts.vdf check failed; nothing written")
+        if f.exists():
+            backup = f.with_name(f"shortcuts.vdf.heroic-ratings-{time.strftime('%Y%m%d-%H%M%S')}.bak")
+            backup.write_bytes(data)
+        tmp = f.with_name("shortcuts.vdf.heroic-ratings.tmp")
+        tmp.write_bytes(new)
+        os.replace(tmp, f)
+        changed.append(str(f))
+        log("added/updated the", DEBUG_SHORTCUT_NAME, "shortcut in", f)
+    if changed:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        SHORTCUT_STATE_FILE.write_text(json.dumps({"added_at": time.time(), "files": changed}))
+    return {"ok": True, "changed": changed, **debug_shortcut_status()}
+
+
+_HEROIC_URL_RE = re.compile(r"heroic://launch(?:/(?P<r1>[\w-]+)/(?P<a1>[^\s\"'&?]+)|\?(?P<q>[^\s\"']+))")
+
+
+def _shortcut_game(entry: dict) -> tuple[str, str] | None:
+    """(runner, app_name) a Heroic-made game shortcut launches, from its heroic:// URL."""
+    m = _HEROIC_URL_RE.search((_field(entry, "Exe") or "") + " " + (_field(entry, "LaunchOptions") or ""))
+    if not m:
+        return None
+    if m.group("q"):
+        q = urllib.parse.parse_qs(m.group("q"))
+        app, runner = (q.get("appName") or [None])[0], (q.get("runner") or [None])[0]
+        return (runner, app) if app and runner else None
+    return m.group("r1"), urllib.parse.unquote(m.group("a1"))
+
+
+def find_game_shortcut(runner: str, app_name: str) -> tuple[dict, Path] | None:
+    """The game's own Steam shortcut (Heroic adds one per installed game), if any."""
+    for f in shortcut_files():
+        try:
+            root = vdf_load(f.read_bytes()) if f.exists() else {}
+        except (OSError, ValueError, IndexError):
+            continue
+        for entry in root.get("shortcuts", {}).values():
+            if isinstance(entry, dict) and _shortcut_game(entry) == (runner, app_name):
+                return entry, f
+    return None
+
+
+def shortcut_loaded_by_steam(entry: dict, f: Path) -> bool:
+    """Has the running Steam loaded this shortcut? Steam reads shortcuts.vdf only at start-up,
+    so a shortcut Heroic added since then isn't launchable through Steam until a restart.
+    We note when we first see each shortcut; one first seen before Steam started is loaded."""
+    started = steam_start_time()
+    if not started:
+        return False
+    appid = str((_field(entry, "appid") or ("int", 0))[1])
+    st = _load_shortcut_state()
+    seen = st.setdefault("seen", {})
+    if appid not in seen:
+        try:
+            older_than_steam = f.stat().st_mtime < started   # whole file predates this Steam session
+        except OSError:
+            older_than_steam = False
+        seen[appid] = 0 if older_than_steam else time.time()
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            SHORTCUT_STATE_FILE.write_text(json.dumps(st))
+        except OSError:
+            pass
+    return seen[appid] < started
+
+
+def note_game_shortcuts():
+    """Record the game shortcuts present now (so ones added later are recognised as new)."""
+    for f in shortcut_files():
+        try:
+            root = vdf_load(f.read_bytes()) if f.exists() else {}
+        except (OSError, ValueError, IndexError):
+            continue
+        for entry in root.get("shortcuts", {}).values():
+            if isinstance(entry, dict) and _shortcut_game(entry):
+                shortcut_loaded_by_steam(entry, f)
+
+
+def steam_run(gameid: int):
+    url = f"steam://rungameid/{gameid}"
+    spawn_detached(["steam", url] if shutil.which("steam") else ["xdg-open", url])
+
+
 # ------------------------------------------------------------------- installing via Heroic's window
 #
 # Heroic 2.22.4 can't start an install from outside: its heroic://launch prompt
@@ -796,10 +1081,6 @@ def spawn_detached(cmd: list[str]):
 # start Heroic with Chromium's debug port (bound to 127.0.0.1), open the game's
 # page in Heroic's own window and press its Install button, which shows Heroic's
 # normal install dialog. Heroic does all the work; we only navigate its UI.
-
-# 0 = let Chromium pick a free port; it writes the port to <profile>/DevToolsActivePort.
-# (A fixed port can clash with another program already listening on it.)
-HEROIC_DEBUG_PORT = int(os.environ.get("HEROIC_RATINGS_HEROIC_DEBUG_PORT", "0"))
 
 
 class _MiniWebSocket:
@@ -900,29 +1181,6 @@ def _cdp_eval(ws_url: str, expr: str, timeout: float = 20):
     return res.get("result", {}).get("value")
 
 
-# Runs inside Heroic's window. Uses only Heroic's own preload API and router:
-# fetch the game's info, navigate to its page (hash router, page state = gameInfo),
-# then click the page's Install button, which opens Heroic's install dialog.
-_OPEN_INSTALL_JS = r"""
-(async (appName, runner) => {
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  for (let i = 0; i < 100 && !(window.api && document.querySelector('main.content')); i++) await sleep(200);
-  if (!window.api) return 'not-ready';
-  const gameInfo = await window.api.getGameInfo(appName, runner);
-  if (!gameInfo) return 'unknown-game';
-  if (gameInfo.is_installed) return 'installed';
-  const idx = (window.history.state && window.history.state.idx) || 0;
-  window.history.pushState({ usr: { gameInfo, fromDM: false }, key: 'hr' + Date.now(), idx: idx + 1 },
-                           '', '#/gamepage/' + runner + '/' + encodeURIComponent(appName));
-  window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
-  for (let i = 0; i < 75; i++) {
-    await sleep(200);
-    const btn = document.querySelector('.installButtons button.mainBtn');
-    if (btn) { btn.click(); return 'dialog'; }
-  }
-  return location.hash.includes('/gamepage/') ? 'page' : 'no-page';
-})(%s, %s)
-"""
 
 
 def heroic_running() -> bool:
@@ -942,9 +1200,8 @@ def heroic_running() -> bool:
 
 
 def _active_debug_port(heroic_dir: Path | None, newer_than: float = 0) -> int | None:
-    """Port Heroic's Chromium chose, from DevToolsActivePort in its profile (= config) folder."""
-    if HEROIC_DEBUG_PORT:
-        return HEROIC_DEBUG_PORT
+    """Port Heroic's Chromium chose (the shortcut passes port 0), from DevToolsActivePort
+    in its profile folder, which is Heroic's config folder."""
     if not heroic_dir:
         return None
     f = heroic_dir / "DevToolsActivePort"
@@ -956,38 +1213,321 @@ def _active_debug_port(heroic_dir: Path | None, newer_than: float = 0) -> int | 
         return None
 
 
-def heroic_debug_command(port: int) -> list[str]:
-    flags = ["--no-sandbox", f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1"]
-    if shutil.which("flatpak") and (HOME / ".var/app" / HEROIC_FLATPAK_ID).is_dir():
-        return ["flatpak", "run", HEROIC_FLATPAK_ID, *flags]
-    if shutil.which("heroic"):
-        return ["heroic", *flags]
-    raise OSError("Heroic not found")
+def ensure_debug_heroic(heroic_dir: Path | None, wait: float = 45) -> dict:
+    """Make sure Heroic is running from our "Heroic (Debug)" Steam shortcut.
+
+    Returns {"ws": <debug socket of Heroic's window>} or {"error": ...}. A Heroic
+    started any other way has no debug port, and games it launches might end up
+    inside our app, so the user is asked to quit it instead.
+    """
+    port = _active_debug_port(heroic_dir)
+    ws = _heroic_page_ws(port) if port else None
+    if ws:
+        return {"ws": ws}
+    if heroic_running():
+        return {"error": "heroic-running"}
+    sc = debug_shortcut_status()
+    if sc["state"] != "ready":
+        return {"error": "shortcut-" + sc["state"]}
+    if not steam_start_time():
+        return {"error": "steam-not-running"}
+    started = time.time()
+    steam_run(sc["gameid"])
+    while time.time() < started + wait:
+        time.sleep(0.5)
+        port = _active_debug_port(heroic_dir, newer_than=started - 2)
+        ws = _heroic_page_ws(port) if port else None
+        if ws:
+            return {"ws": ws}
+    log("Heroic (Debug) didn't come up (debug port file:", port, ")")
+    return {"error": "heroic-not-started"}
 
 
-def install_via_heroic_ui(runner: str, app_name: str, heroic_dir: Path | None, wait: float = 45) -> dict:
-    """Open Heroic's install dialog for a game. Returns {"result": ...} or {"error": ...}."""
-    port = _active_debug_port(heroic_dir)       # Heroic still running from an earlier install?
+def launch_game(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
+    """Launch a game outside our app: through its own Steam shortcut when Steam has loaded
+    it, otherwise through Heroic (Debug). Returns {"via": ...} or {"error": ...}."""
+    found = find_game_shortcut(runner, app_name)
+    if found and shortcut_loaded_by_steam(*found):
+        steam_run(shortcut_gameid(found[0]))
+        return {"via": "steam-shortcut"}
+    r = ensure_debug_heroic(heroic_dir)
+    if "error" in r:
+        return r
+    # Heroic (Debug) is running: this short-lived second instance hands the URL to it,
+    # so the game runs under Heroic's Steam entry, not ours.
+    spawn_detached(heroic_command(runner, app_name))
+    return {"via": "heroic"}
+
+
+def shortcut_gameid(entry: dict) -> int:
+    """64-bit game ID that steam://rungameid/ uses for a non-Steam shortcut."""
+    return ((_field(entry, "appid") or ("int", 0))[1] << 32) | 0x02000000
+
+
+# Heroic's window exists before Heroic has loaded its library and store logins; until
+# then getGameInfo / getInstallInfo come back empty. Ask again until they answer.
+_JS_UNTIL = r"""
+const until = async (fn, secs) => {
+  for (let i = 0; i < secs * 2; i++) {
+    try { const v = await fn(); if (v) return v; } catch (e) {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return null;
+};
+for (let i = 0; i < 60 && !window.api; i++) await new Promise(r => setTimeout(r, 500));
+// Heroic's own per-game prefix: <defaultWinePrefixDir>/<title without special characters>
+// (same character list as Heroic's removeSpecialcharacters)
+const HEROIC_SPECIAL = new RegExp("[:|/|*|?|<|>|\\\\|&|{|}|%|$|@|`|!|™|+|'|\"|®]", "gi");
+const ownPrefix = (app, gs, title) => {
+  if (gs && gs.winePrefix && gs.winePrefix !== app.winePrefix) return gs.winePrefix;   // already has its own
+  return app.defaultWinePrefixDir + "/" + title.replaceAll(HEROIC_SPECIAL, "");
+};
+"""
+
+# Runs inside Heroic's window: everything Heroic's own install dialog would offer.
+# Values and defaults follow Heroic 2.22.4's DownloadDialog / WineSelector.
+_INSTALL_OPTIONS_JS = r"""
+(async (appName, runner, platform) => {
+  %s
+  const api = window.api;
+  if (!api) return { error: 'not-ready' };
+  const gi = await until(() => api.getGameInfo(appName, runner), 30);
+  if (!gi) return { error: 'unknown-game' };
+  if (gi.is_installed) return { error: 'installed' };
+  const platforms = ['Windows'];
+  if (gi.is_linux_native) platforms.push('linux');
+  if (!platforms.includes(platform)) platform = 'Windows';
+  const rp = runner === 'legendary' ? platform : (platform === 'Windows' ? 'windows' : platform);
+  const info = await until(async () => { const i = await api.getInstallInfo(appName, runner, rp); return i && i.manifest ? i : null; }, 30);
+  if (!info) return { error: 'no-install-info' };
+  const m = info.manifest;
+  const app = await api.requestAppSettings();
+  const out = {
+    title: gi.title, platforms, platform,
+    download: m.download_size || 0, disk: m.disk_size || 0, perLang: m.perLangSize || null,
+    languages: (m.languages || []).slice().sort(),
+    dlcs: (runner === 'legendary' || runner === 'gog') && info.game && info.game.owned_dlc
+      ? info.game.owned_dlc.map(d => ({ id: d.app_name, title: d.title, perLang: d.perLangSize || null })) : [],
+    sdl: [], defaultPath: app.defaultInstallPath, wine: [], wineDefault: null,
+    uiLangs: navigator.languages || [navigator.language],
+  };
+  if (runner === 'legendary') {
+    try {
+      const o = await api.getGameOverride();
+      if (o && o.sdl_config && o.sdl_config[appName]) out.sdl = (await api.getGameSdl(appName)) || [];
+    } catch (e) {}
+  }
+  if (platform === 'Windows') {
+    out.wine = ((await api.getAlternativeWine()) || []).map(w => ({ name: w.name, type: w.type, bin: w.bin }));
+    const gs = await api.requestGameSettings(appName);
+    const cur = gs && gs.wineVersion && out.wine.find(w => w.bin === gs.wineVersion.bin);
+    out.wineDefault = cur ? cur.bin : (out.wine[0] ? out.wine[0].bin : null);
+    out.prefixOwn = ownPrefix(app, gs, gi.title || appName);
+    out.prefixShared = app.winePrefix;
+  }
+  return out;
+})(%s, %s, %s)
+"""
+
+# Runs inside Heroic's window: save the chosen Wine/Proton the way the dialog does,
+# then queue the install with Heroic's own install function.
+_INSTALL_WITH_JS = r"""
+(async (p, wineBin, sharedPrefix) => {
+  %s
+  const api = window.api;
+  if (!api) return 'not-ready';
+  const gameInfo = await until(() => api.getGameInfo(p.appName, p.runner), 30);
+  if (!gameInfo) return 'unknown-game';
+  if (gameInfo.is_installed) return 'installed';
+  if (p.platformToInstall === 'Windows') {
+    // Like Heroic's install dialog: its own prefix unless "shared" was chosen, plus the Wine/Proton picked.
+    const app = await api.requestAppSettings();
+    const gs = await api.requestGameSettings(p.appName);
+    const config = { ...gs, winePrefix: sharedPrefix ? app.winePrefix : ownPrefix(app, gs, gameInfo.title || p.appName) };
+    const w = wineBin && ((await api.getAlternativeWine()) || []).find(x => x.bin === wineBin);
+    if (w) config.wineVersion = w;
+    await api.writeConfig({ appName: p.appName, config });
+  }
+  const queued = api.install({ ...p, gameInfo });
+  await Promise.race([queued, new Promise(r => setTimeout(r, 5000))]);
+  return 'queued';
+})(%s, %s, %s)
+"""
+
+# Runs inside Heroic's window: what Heroic's uninstall dialog shows (2.22.4 UninstallModal).
+_UNINSTALL_OPTIONS_JS = r"""
+(async (appName, runner) => {
+  %s
+  const api = window.api;
+  if (!api) return { error: 'not-ready' };
+  const gi = await until(() => api.getGameInfo(appName, runner), 30);
+  if (!gi) return { error: 'unknown-game' };
+  if (!gi.is_installed) return { error: 'not-installed' };
+  const native = !!(await api.isNative({ appName, runner }));
+  const out = { title: gi.title, installPath: (gi.install && gi.install.install_path) || '', native,
+                prefix: '', prefixShared: false, epicBusy: false };
+  if (!native && gi.install && String(gi.install.platform || '').toLowerCase() === 'windows') {
+    const gs = await api.requestGameSettings(appName);
+    const def = await api.requestGameSettings('default');
+    out.prefix = (gs && gs.winePrefix) || '';
+    out.prefixShared = !!def && out.prefix === def.winePrefix;
+  }
+  if (runner === 'legendary') {   // Heroic can't uninstall an Epic game while another one installs
+    const q = await api.getDMQueueInformation();
+    out.epicBusy = q.state === 'running' && (q.elements || []).some(e => e.params.runner === 'legendary');
+  }
+  return out;
+})(%s, %s)
+"""
+
+# Runs inside Heroic's window: start the uninstall. Heroic's call only returns when it's
+# finished, so don't wait for it; progress comes through the status events.
+_UNINSTALL_JS = r"""
+(async (appName, runner, removePrefix, removeSettings) => {
+  const api = window.api;
+  if (!api) return 'not-ready';
+  const done = api.uninstall(appName, runner, removePrefix, removeSettings).then(() => 'done', () => 'error');
+  return await Promise.race([done, new Promise(r => setTimeout(() => r('started'), 3000))]);
+})(%s, %s, %s, %s)
+"""
+
+# Runs inside Heroic's window: Heroic only sends progress as events, so keep the
+# latest one per game in a small listener, and read the download queue.
+_DOWNLOADS_JS = r"""
+(async () => {
+  const api = window.api;
+  if (!window.__heroicRatingsProgress) {
+    window.__heroicRatingsProgress = {};
+    const keep = (e, st) => {
+      if (st && st.appName) window.__heroicRatingsProgress[st.appName] =
+        Object.assign({}, window.__heroicRatingsProgress[st.appName], st, { t: Date.now() });
+    };
+    api.onProgressUpdate(keep);
+    api.handleGameStatus(keep);
+  }
+  const q = await api.getDMQueueInformation();
+  const now = Date.now();
+  return {
+    state: q.state,
+    queue: (q.elements || []).map(e => ({ appName: e.params.appName, runner: e.params.runner, type: e.type })),
+    progress: window.__heroicRatingsProgress,
+    uninstalling: Object.values(window.__heroicRatingsProgress)
+      .filter(p => p.status === 'uninstalling' && now - p.t < 30 * 60 * 1000)
+      .map(p => ({ appName: p.appName, runner: p.runner })),
+  };
+})()
+"""
+
+
+def install_locations(default_path: str | None) -> list[dict]:
+    """Heroic's default folder plus any SD card / USB drive, each with free space."""
+    def free(path: Path) -> int | None:
+        p = path
+        while not p.exists() and p != p.parent:
+            p = p.parent
+        try:
+            return shutil.disk_usage(p).free
+        except OSError:
+            return None
+    locs = []
+    if default_path:
+        locs.append({"label": "Heroic's default", "path": default_path, "free": free(Path(default_path))})
+    # SteamOS mounts SD cards at /run/media/<label> (older: /run/media/<user>/<label>).
+    mounts = []
+    try:
+        for d in sorted(Path("/run/media").iterdir()):
+            if os.path.ismount(d):
+                mounts.append(d)
+            elif d.is_dir():
+                mounts += sorted(x for x in d.iterdir() if os.path.ismount(x))
+    except OSError:
+        pass
+    for mnt in mounts:
+        path = str(mnt / "Games" / "Heroic")
+        if path != default_path:
+            locs.append({"label": f"{mnt.name} (removable)", "path": path, "free": free(mnt)})
+    return locs
+
+
+def install_options(runner: str, app_name: str, platform: str, heroic_dir: Path | None) -> dict:
+    r = ensure_debug_heroic(heroic_dir)
+    if "error" in r:
+        return r
+    try:
+        opts = _cdp_eval(r["ws"], _INSTALL_OPTIONS_JS % (_JS_UNTIL, json.dumps(app_name), json.dumps(runner),
+                                                         json.dumps(platform or "Windows")), timeout=100)
+    except (OSError, RuntimeError, ValueError) as e:
+        log("install options failed:", e)
+        return {"error": "script", "detail": str(e)}
+    if not isinstance(opts, dict):
+        return {"error": "script", "detail": repr(opts)}
+    if "error" not in opts:
+        opts["locations"] = install_locations(opts.get("defaultPath"))
+    return opts
+
+
+def install_with_options(runner: str, app_name: str, o: dict, heroic_dir: Path | None) -> dict:
+    """Queue an install in Heroic with the options chosen in our app."""
+    def strs(v):
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+    path = o.get("path")
+    if not isinstance(path, str) or not path.startswith("/"):
+        return {"error": "bad-path"}
+    params = {"appName": app_name, "runner": runner, "path": path,
+              "platformToInstall": o.get("platform") if o.get("platform") in ("Windows", "linux") else "Windows",
+              "installDlcs": strs(o.get("dlcs")), "sdlList": strs(o.get("sdl")),
+              "installLanguage": o.get("language") if isinstance(o.get("language"), str) else ""}
+    wine = o.get("wine") if isinstance(o.get("wine"), str) and params["platformToInstall"] == "Windows" else None
+    r = ensure_debug_heroic(heroic_dir)
+    if "error" in r:
+        return r
+    try:
+        result = _cdp_eval(r["ws"], _INSTALL_WITH_JS % (_JS_UNTIL, json.dumps(params), json.dumps(wine),
+                                                        json.dumps(o.get("sharedPrefix") is True)), timeout=60)
+    except (OSError, RuntimeError, ValueError) as e:
+        log("install failed:", e)
+        return {"error": "script", "detail": str(e)}
+    log("install:", app_name, params["platformToInstall"], path, "->", result)
+    return {"result": result}
+
+
+def uninstall_options(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
+    r = ensure_debug_heroic(heroic_dir)
+    if "error" in r:
+        return r
+    try:
+        o = _cdp_eval(r["ws"], _UNINSTALL_OPTIONS_JS % (_JS_UNTIL, json.dumps(app_name), json.dumps(runner)), timeout=60)
+    except (OSError, RuntimeError, ValueError) as e:
+        return {"error": "script", "detail": str(e)}
+    return o if isinstance(o, dict) else {"error": "script", "detail": repr(o)}
+
+
+def start_uninstall(runner: str, app_name: str, remove_prefix: bool, remove_settings: bool,
+                    heroic_dir: Path | None) -> dict:
+    r = ensure_debug_heroic(heroic_dir)
+    if "error" in r:
+        return r
+    try:
+        result = _cdp_eval(r["ws"], _UNINSTALL_JS % (json.dumps(app_name), json.dumps(runner),
+                                                     json.dumps(bool(remove_prefix)), json.dumps(bool(remove_settings))),
+                           timeout=15)
+    except (OSError, RuntimeError, ValueError) as e:
+        return {"error": "script", "detail": str(e)}
+    log("uninstall:", app_name, "prefix" if remove_prefix else "", "settings" if remove_settings else "", "->", result)
+    return {"result": result}
+
+
+def heroic_downloads(heroic_dir: Path | None) -> dict:
+    """Heroic's download queue and latest progress, if Heroic (Debug) is running. Never starts Heroic."""
+    port = _active_debug_port(heroic_dir)
     ws = _heroic_page_ws(port) if port else None
     if not ws:
-        if heroic_running():
-            return {"error": "heroic-running"}
-        started = time.time()
-        spawn_detached(heroic_debug_command(HEROIC_DEBUG_PORT))
-        while not ws and time.time() < started + wait:
-            time.sleep(0.5)
-            port = _active_debug_port(heroic_dir, newer_than=started - 2)
-            ws = _heroic_page_ws(port) if port else None
-        if not ws:
-            log("install helper: Heroic's debug port never appeared (port file:", port, ")")
-            return {"error": "no-debug-port"}
+        return {"running": False}
     try:
-        result = _cdp_eval(ws, _OPEN_INSTALL_JS % (json.dumps(app_name), json.dumps(runner)), timeout=45)
-    except (OSError, RuntimeError, ValueError) as e:
-        log("install helper failed:", e)
-        return {"error": "script", "detail": str(e)}
-    log("install helper:", result)
-    return {"result": result}
+        d = _cdp_eval(ws, _DOWNLOADS_JS, timeout=5)
+    except (OSError, RuntimeError, ValueError):
+        return {"running": False}
+    return {"running": True, **(d if isinstance(d, dict) else {})}
 
 
 # ------------------------------------------------------------------- HTTP server
@@ -1034,23 +1574,61 @@ def make_handler(state: State, on_quit):
                 body = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 return self._json({"error": "bad json"}, 400)
+            if path == "/api/steam-shortcut":
+                try:
+                    if not body.get("add"):
+                        note_game_shortcuts()
+                    return self._json(add_debug_shortcut() if body.get("add")
+                                      else {"ok": True, **debug_shortcut_status()})
+                except (OSError, ValueError) as e:
+                    return self._json({"ok": False, "error": str(e)}, 500)
+            if path in ("/api/install-options", "/api/install-start"):
+                g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
+                if not g:
+                    return self._json({"error": "unknown game"}, 404)
+                try:
+                    if path == "/api/install-options":
+                        r = install_options(g["runner"], g["app_name"], body.get("platform"), state.heroic)
+                    else:
+                        r = install_with_options(g["runner"], g["app_name"], body.get("options") or {}, state.heroic)
+                except OSError as e:
+                    return self._json({"error": str(e)}, 500)
+                return self._json({"ok": "error" not in r, **r})
+            if path in ("/api/uninstall-options", "/api/uninstall-start"):
+                g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
+                if not g:
+                    return self._json({"error": "unknown game"}, 404)
+                try:
+                    if path == "/api/uninstall-options":
+                        r = uninstall_options(g["runner"], g["app_name"], state.heroic)
+                    else:
+                        r = start_uninstall(g["runner"], g["app_name"], body.get("removePrefix") is True,
+                                            body.get("removeSettings") is True, state.heroic)
+                except OSError as e:
+                    return self._json({"error": str(e)}, 500)
+                return self._json({"ok": "error" not in r, **r})
+            if path == "/api/downloads":
+                return self._json(heroic_downloads(state.heroic))
             if path in ("/api/launch", "/api/install"):
                 gid = body.get("id", "")
                 g = next((g for g in state.games if g["id"] == gid), None)
                 if not g:
                     return self._json({"error": "unknown game"}, 404)
-                if path == "/api/install" and not os.environ.get("HEROIC_LAUNCH_CMD"):
+                if os.environ.get("HEROIC_LAUNCH_CMD"):   # custom command: hand it the URL as-is
                     try:
-                        r = install_via_heroic_ui(g["runner"], g["app_name"], state.heroic)
+                        spawn_detached(heroic_command(g["runner"], g["app_name"],
+                                                      show_gui=path == "/api/install"))
                     except OSError as e:
                         return self._json({"error": str(e)}, 500)
-                    return self._json({"ok": "result" in r, **r})
+                    return self._json({"ok": True})
+                if path == "/api/install":   # installs go through /api/install-options + /api/install-start
+                    return self._json({"error": "use /api/install-options"}, 400)
                 try:
-                    spawn_detached(heroic_command(g["runner"], g["app_name"],
-                                                  show_gui=path == "/api/install"))
+                    r = launch_game(g["runner"], g["app_name"], state.heroic)
                 except OSError as e:
                     return self._json({"error": str(e)}, 500)
-                return self._json({"ok": True})
+                log(path, g["title"], "->", r)
+                return self._json({"ok": "error" not in r, **r})
             if path == "/api/refresh":
                 state.force = bool(body.get("force"))
                 state.wake.set()

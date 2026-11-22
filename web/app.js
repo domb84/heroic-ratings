@@ -116,7 +116,8 @@ function rowEl(g) {
 }
 
 function rowHTML(g) {
-  const sub = [g.store, g.installed ? '<span class="inst">● Installed</span>' : "", esc(g.genres.slice(0, 3).join(", "))].filter(Boolean).join(" · ");
+  const dl = downloadText(g);
+  const sub = [g.store, g.installed && !dl ? '<span class="inst">● Installed</span>' : "", dl ? `<span class="dl">${esc(dl)}</span>` : "", esc(g.genres.slice(0, 3).join(", "))].filter(Boolean).join(" · ");
   return `<div class="row" data-id="${esc(g.id)}">
     ${g.art ? `<img loading="lazy" decoding="async" src="${esc(img(g.art, 120))}" alt="">` : '<div class="noimg"></div>'}
     <div class="t"><div class="name">${esc(g.title)}</div><div class="sub">${sub}</div></div>
@@ -212,7 +213,7 @@ function renderDetail(g) {
     <div class="facts">${g.year ? `Released <b>${g.year}</b>` : ""}${g.year && g.devs?.length ? " · " : ""}${g.devs?.length ? `<b>${esc(g.devs.slice(0, 2).join(", "))}</b>` : ""}</div>
     <div class="tags">${genres.map(t => `<span class="tag g">${esc(t)}</span>`).join("")}${others.map(t => `<span class="tag">${esc(t)}</span>`).join("")}</div>
     ${g.desc ? `<p>${esc(g.desc)}</p>` : ""}
-    <div class="state">${g.installed ? '<span class="inst">● Installed</span>' : "Not installed"} · ${esc(g.store)}</div>`;
+    <div class="state">${downloadText(g, true) ? `<span class="dl">${esc(downloadText(g, true))}</span>` : g.installed ? '<span class="inst">● Installed</span>' : "Not installed"} · ${esc(g.store)}</div>`;
 }
 
 // ---------------------------------------------------------------- data
@@ -296,7 +297,7 @@ function renderModal() {
   const items = m.items();
   m.sel = Math.max(0, Math.min(items.length - 1, m.sel));
   els.modal.innerHTML = `<h3>${esc(m.title)}<small>${m.hint || ""}</small></h3>
-    <div class="opts">${items.map((it, i) => `<div class="opt ${i === m.sel ? "sel" : ""} ${it.on ? "on" : ""}" data-i="${i}">
+    <div class="opts">${items.map((it, i) => `<div class="opt ${i === m.sel ? "sel" : ""} ${it.on ? "on" : ""} ${it.info ? "info" : ""}" data-i="${i}">
       <span>${esc(it.label)}</span>${it.value != null ? `<span class="v ${it.change ? "arrows" : ""}">${esc(it.value)}</span>` : ""}</div>`).join("")}</div>`;
   els.modal.querySelector(".opt.sel")?.scrollIntoView({ block: "nearest" });
 }
@@ -368,7 +369,10 @@ function openMenu() {
       { label: "Installed only", value: S.installedOnly ? "On" : "Off", change: () => { S.installedOnly = !S.installedOnly; refilter(); } },
       { label: "Hide unrated games", value: S.hideUnrated ? "On" : "Off", change: () => { S.hideUnrated = !S.hideUnrated; refilter(); } },
       { label: "Search…", activate: () => { closeModal(); focusSearch(); } },
+      { label: "Heroic (Debug) Steam shortcut", value: SHORTCUT_TEXT[shortcut.state] || "Checking…",
+        activate: () => { closeModal(); checkShortcut(true); } },
       { label: "Controller test", activate: () => { closeModal(); openDiag(); } },
+      ...(g && g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
       ...(g && g.appid ? [{ label: `Wrong Steam match for “${g.title}”`, activate: () => wrongMatch(g) }] : []),
       { label: "Refresh library & new ratings", activate: () => { api("/api/refresh", {}); closeModal(); toast("Refreshing…"); } },
       { label: "Re-fetch all ratings", activate: () => { api("/api/refresh", { force: true }); closeModal(); toast("Re-fetching everything from Steam…"); } },
@@ -406,8 +410,7 @@ function launchSelected() {
     openModal({
       kind: "confirm", yes: "Install",
       html: `<b>${esc(g.title)}</b> isn't installed.<br>Install it with Heroic?
-        <div class="note">Heroic opens on the game's page with its install dialog, where you choose the options.
-        Keep Heroic running until the download finishes.</div>`,
+        <div class="note">Next you choose the install options (location, DLC, Wine/Proton, …). Heroic does the download.</div>`,
       onYes: () => installViaHeroic(g),
     });
     return;
@@ -415,36 +418,244 @@ function launchSelected() {
   openModal({
     kind: "confirm", yes: "Launch", html: `Launch <b>${esc(g.title)}</b>?`,
     onYes: async () => {
-      const r = await api("/api/launch", { id: g.id });
-      if (r.ok) pauseFor(`Playing ${g.title}`, "Starting via Heroic…");
-      else toast("Launch failed: " + r.error, 5000);
+      // Through the game's own Steam shortcut if Steam has it, otherwise through
+      // Heroic (Debug); either way the game runs as its own Steam app, not inside this one.
+      pauseFor(`Playing ${g.title}`, "Starting…");
+      let r;
+      try { r = await api("/api/launch", { id: g.id }); } catch { r = { error: "network" }; }
+      if (r.ok) {
+        $("pausedSub").textContent = r.via === "steam-shortcut" ? "Started through its Steam shortcut." : "Started through Heroic.";
+        return;
+      }
+      resume();
+      heroicProblem(r.error, `launch <b>${esc(g.title)}</b>`, "");
     },
   });
 }
 
-// Heroic can't take install requests from other apps (its prompt's Yes button is
-// broken, Heroic issue #6053), so the backend opens the game's page in Heroic's
-// window and presses Install there. This can take a while if Heroic has to start.
-async function installViaHeroic(g) {
-  pauseFor(`Opening ${g.title} in Heroic`, "Starting Heroic… this can take up to a minute.");
+// Installing: Heroic's own "install?" prompt is broken (Heroic issue #6053), so the
+// app reads the same options Heroic's install dialog offers (through Heroic (Debug)),
+// shows them here, and queues the install with Heroic's own install function.
+const fmtSize = b => !b ? "?" : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GB" : Math.max(1, Math.round(b / 1048576)) + " MB";
+const langName = (() => {
+  let dn = null;
+  try { dn = new Intl.DisplayNames(["en"], { type: "language" }); } catch {}
+  return code => { try { return dn ? dn.of(code) || code : code; } catch { return code; } };
+})();
+
+async function installViaHeroic(g, platform) {
+  pauseFor(`Getting install options for ${g.title}`, "Starting Heroic if needed… this can take up to a minute.");
   let r;
-  try { r = await api("/api/install", { id: g.id }); } catch { r = { error: "network" }; }
-  const findIt = `Or open Heroic yourself, search for <b>${esc(g.title)}</b> and press <b>Install</b>.`;
-  const tell = html => { resume(); openModal({ kind: "confirm", yes: "OK", html, onYes: () => {} }); };
-  if (r.result === "dialog" || r.result === "page") {
-    $("pausedTitle").textContent = `Installing ${g.title} in Heroic`;
-    $("pausedSub").textContent = r.result === "dialog" ? "Choose the install options in Heroic's dialog." : "Press Install on the game's page in Heroic.";
-    setTimeout(() => window.shell?.stepAside(), 300);  // so Heroic's window isn't hidden behind ours
-  } else if (r.result === "installed") {
-    resume(); toast(`${g.title} is already installed in Heroic`, 4000);
-  } else if (r.error === "heroic-running") {
-    tell(`Heroic is already open, so this app can't open the install dialog in it.
-      <div class="note">Quit Heroic completely (in Desktop Mode: tray icon → Quit), then try again. ${findIt}</div>`);
-  } else {
-    tell(`Couldn't open the install dialog in Heroic <span class="note">(${esc(r.error || r.result || "unknown")})</span>.
-      <div class="note">${findIt}</div>`);
+  try { r = await api("/api/install-options", { id: g.id, platform }); } catch { r = { error: "network" }; }
+  resume(true);
+  if (r.error === "installed") { toast(`${g.title} is already installed in Heroic`, 4000); return; }
+  if (r.error) {
+    heroicProblem(r.error, `get the install options for <b>${esc(g.title)}</b>`,
+      `Or open Heroic yourself, search for <b>${esc(g.title)}</b> and press <b>Install</b>.`);
+    return;
   }
+  openInstallOptions(g, r);
 }
+
+function preferredLanguage(available, preferred) {
+  // Same rule as Heroic: the first UI language that prefixes an available one, else the first.
+  for (const p of preferred.map(x => x.toLowerCase())) {
+    const hit = available.find(a => a.toLowerCase().startsWith(p)) || available.find(a => a.toLowerCase().startsWith(p.split("-")[0]));
+    if (hit) return hit;
+  }
+  return available[0] || "";
+}
+
+function openInstallOptions(g, o) {
+  const sdlKey = sd => sd.tags.join(",");
+  const st = {
+    loc: 0,
+    lang: o.languages.length ? preferredLanguage(o.languages, o.uiLangs || []) : "",
+    dlcs: new Set(o.dlcs.map(d => d.id)),                      // Heroic pre-selects all DLC
+    sdl: new Set(o.sdl.filter(sd => sd.required).map(sdlKey)),
+    wine: o.wineDefault,
+    sharedPrefix: false,          // Heroic's "Use shared Wine prefix" starts off: each game gets its own
+  };
+  const sizes = () => {
+    if (!o.perLang) return { dl: o.download, disk: o.disk, dlcUnknown: st.dlcs.size > 0 };
+    const part = (pl, k) => pl ? (pl[st.lang]?.[k] || 0) + (pl["*"]?.[k] || 0) : 0;
+    let dl = part(o.perLang, "download_size"), disk = part(o.perLang, "disk_size");
+    for (const d of o.dlcs) if (st.dlcs.has(d.id)) { dl += part(d.perLang, "download_size"); disk += part(d.perLang, "disk_size"); }
+    return { dl, disk, dlcUnknown: false };
+  };
+  const toggle = (set, key) => { set.has(key) ? set.delete(key) : set.add(key); };
+  const items = () => {
+    const loc = o.locations[st.loc] || { label: "?", path: "", free: null };
+    const sz = sizes();
+    const fits = loc.free == null || !sz.disk || loc.free >= sz.disk;
+    const list = [];
+    list.push({ label: "Install location", value: `${loc.label} · ${loc.free == null ? "?" : fmtSize(loc.free)} free`,
+                change: o.locations.length > 1 ? d => { st.loc = (st.loc + d + o.locations.length) % o.locations.length; } : null });
+    if (o.platforms.length > 1)
+      list.push({ label: "Platform", value: o.platform === "linux" ? "Linux (native)" : "Windows",
+                  change: () => { closeModal(); installViaHeroic(g, o.platform === "linux" ? "Windows" : "linux"); } });
+    if (o.languages.length > 1)
+      list.push({ label: "Language", value: langName(st.lang),
+                  change: d => { st.lang = cycle(o.languages, st.lang, d); } });
+    if (o.wine.length)
+      list.push({ label: "Wine / Proton", value: (o.wine.find(w => w.bin === st.wine) || o.wine[0]).name,
+                  change: d => { st.wine = cycle(o.wine.map(w => w.bin), st.wine, d); } });
+    if (o.prefixOwn)
+      list.push({ label: "Wine prefix", value: st.sharedPrefix ? `Shared · ${o.prefixShared}` : `Own · ${o.prefixOwn}`,
+                  change: () => { st.sharedPrefix = !st.sharedPrefix; } });
+    if (o.dlcs.length > 1)
+      list.push({ label: "All DLC", value: st.dlcs.size === o.dlcs.length ? "Yes" : st.dlcs.size ? "Some" : "No",
+                  change: () => { st.dlcs = st.dlcs.size === o.dlcs.length ? new Set() : new Set(o.dlcs.map(d => d.id)); } });
+    for (const d of o.dlcs)
+      list.push({ label: "DLC: " + d.title, value: st.dlcs.has(d.id) ? "Yes" : "No", on: st.dlcs.has(d.id), change: () => toggle(st.dlcs, d.id) });
+    for (const sd of o.sdl)
+      list.push({ label: sd.name, value: sd.required ? "Required" : st.sdl.has(sdlKey(sd)) ? "Yes" : "No", on: st.sdl.has(sdlKey(sd)),
+                  change: sd.required ? null : () => toggle(st.sdl, sdlKey(sd)) });
+    list.push({ info: true, label: `Download ${fmtSize(sz.dl)} · Installed ${fmtSize(sz.disk)}${sz.dlcUnknown ? " + DLC" : ""}`, value: fits ? null : "Not enough space" });
+    list.push({ label: fits ? `Install ${g.title}` : "Not enough free space here", activate: () => {
+      if (!fits) { toast("Not enough free space at this location", 3000); return; }
+      closeModal();
+      startInstall(g, {
+        path: loc.path, platform: o.platform, language: st.lang,
+        dlcs: o.dlcs.filter(d => st.dlcs.has(d.id)).map(d => d.id),
+        sdl: o.sdl.filter(sd => st.sdl.has(sdlKey(sd))).flatMap(sd => sd.tags),
+        wine: o.platform === "Windows" ? st.wine : null,
+        sharedPrefix: st.sharedPrefix,
+      });
+    } });
+    return list;
+  };
+  const m = { kind: "list", title: `Install ${g.title}`, hint: "◀ ▶ change · A select · B cancel", items, sel: 0 };
+  m.sel = items().length - 1;   // start on the Install button
+  openModal(m);
+}
+
+async function startInstall(g, options) {
+  let r;
+  try { r = await api("/api/install-start", { id: g.id, options }); } catch { r = { error: "network" }; }
+  if (r.result === "queued") { toast(`${g.title} added to Heroic's downloads`, 3500); setTimeout(pollDownloads, 1000); }
+  else if (r.result === "installed") toast(`${g.title} is already installed`, 3500);
+  else heroicProblem(r.error || r.result, `install <b>${esc(g.title)}</b>`, "");
+}
+
+// Uninstalling, with the same choices as Heroic's uninstall dialog (both off by default).
+async function uninstallFlow(g) {
+  pauseFor(`Uninstall ${g.title}`, "Asking Heroic… this can take a moment if Heroic has to start.");
+  let o;
+  try { o = await api("/api/uninstall-options", { id: g.id }); } catch { o = { error: "network" }; }
+  resume(true);
+  if (o.error === "not-installed") { toast(`${g.title} isn't installed`, 3000); setTimeout(loadGames, 500); return; }
+  if (o.error) { heroicProblem(o.error, `uninstall <b>${esc(g.title)}</b>`, ""); return; }
+  if (o.epicBusy) {
+    openModal({ kind: "confirm", yes: "OK", onYes: () => {}, html: `Heroic can't uninstall an Epic game while another Epic game is installing.
+      <div class="note">Try again when the download has finished.</div>` });
+    return;
+  }
+  const st = { prefix: false, settings: false };
+  const items = () => {
+    const list = [{ info: true, label: "Installed in", value: o.installPath || "?" }];
+    if (!o.native && o.prefix) {
+      list.push({ label: "Remove Wine prefix", value: o.prefixShared ? "Shared, kept" : st.prefix ? "Yes" : "No", on: st.prefix,
+                  change: o.prefixShared ? null : () => { st.prefix = !st.prefix; } });
+      list.push({ info: true, label: o.prefixShared ? "This game uses Heroic's shared prefix, which is never removed"
+                                                    : "Also deletes save files in the prefix that aren't backed up", value: o.prefix });
+    }
+    list.push({ label: "Erase settings and log", value: st.settings ? "Yes" : "No", on: st.settings, change: () => { st.settings = !st.settings; } });
+    list.push({ label: `Uninstall ${g.title}`, activate: () => { closeModal(); startUninstall(g, st); } });
+    return list;
+  };
+  openModal({ kind: "list", title: `Uninstall ${g.title}?`, hint: "◀ ▶ change · A select · B cancel", items, sel: 1 });
+}
+
+async function startUninstall(g, st) {
+  let r;
+  try { r = await api("/api/uninstall-start", { id: g.id, removePrefix: st.prefix, removeSettings: st.settings }); } catch { r = { error: "network" }; }
+  if (r.result === "started" || r.result === "done") { toast(`Uninstalling ${g.title}…`, 3000); setTimeout(pollDownloads, 800); if (r.result === "done") setTimeout(loadGames, 1500); }
+  else heroicProblem(r.error || r.result, `uninstall <b>${esc(g.title)}</b>`, "");
+}
+
+// Download progress from Heroic's queue, shown on the game's row and in its details.
+S.downloads = {};
+function downloadText(g, long = false) {
+  const d = S.downloads[g.id];
+  if (!d) return "";
+  if (d.uninstalling) return "Uninstalling…";
+  if (!d.active) return long ? "Queued in Heroic" : "Queued";
+  const pct = d.percent != null ? Math.round(d.percent) + "%" : "";
+  if (!long) return `⬇ ${pct || "Downloading"}`;
+  return ["Downloading " + pct, d.speed ? d.speed.toFixed(1) + " MiB/s" : "", d.eta ? d.eta + " left" : ""].filter(Boolean).join(" · ");
+}
+async function pollDownloads() {
+  let d;
+  try { d = await api("/api/downloads", {}); } catch { return; }
+  const next = {};
+  if (d.running) (d.queue || []).forEach((q, i) => {
+    const pr = (d.progress || {})[q.appName] || {};
+    next[`${q.runner}:${q.appName}`] = { active: i === 0 && d.state === "running", percent: pr.progress?.percent,
+                                          speed: pr.progress?.downSpeed, eta: pr.progress?.eta };
+  });
+  if (d.running) for (const u of d.uninstalling || []) next[`${u.runner}:${u.appName}`] = { uninstalling: true };
+  const ids = new Set([...Object.keys(next), ...Object.keys(S.downloads)]);
+  const changed = [...ids].filter(id => JSON.stringify(next[id]) !== JSON.stringify(S.downloads[id]));
+  const finished = Object.keys(S.downloads).some(id => !next[id]);
+  S.downloads = next;
+  for (const id of changed) {
+    const g = S.games.find(x => x.id === id);
+    if (!g || !rowCache.has(id)) continue;
+    const el = rowEl(g);
+    if (S.view[S.sel]?.id === id) { el.classList.add("sel"); renderDetail(g); }
+  }
+  if (finished) setTimeout(loadGames, 1500);   // let Heroic write installed.json first
+}
+setInterval(pollDownloads, 2500);
+
+// Shared explanations for why Heroic (Debug) couldn't be used.
+function heroicProblem(code, what, extra) {
+  const msg = {
+    "heroic-running": `Heroic is already open, but not from this app's <b>Heroic (Debug)</b> shortcut, so this app can't ${what}.
+      <div class="note">Quit Heroic completely (Desktop Mode: tray icon → Quit; Game Mode: Steam button → Heroic → Exit game), then try again. ${extra}</div>`,
+    "shortcut-restart": `Steam hasn't loaded the <b>Heroic (Debug)</b> shortcut yet. ${RESTART_HTML}`,
+    "shortcut-outdated": `The <b>Heroic (Debug)</b> Steam shortcut needs updating. Open the menu and choose <b>Heroic (Debug) Steam shortcut</b>.`,
+    "shortcut-missing": `The <b>Heroic (Debug)</b> Steam shortcut is missing. Open the menu and choose <b>Heroic (Debug) Steam shortcut</b> to add it.`,
+    "shortcut-no-steam": `Steam's user folder wasn't found, so the <b>Heroic (Debug)</b> shortcut can't be used.`,
+    "steam-not-running": `Steam isn't running. Start Steam, then try again.`,
+    "heroic-not-started": `Heroic didn't start from the <b>Heroic (Debug)</b> shortcut within 45 seconds.
+      <div class="note">Try again, or start Heroic (Debug) from Steam's Hidden collection to check it works. ${extra}</div>`,
+  }[code];
+  openModal({ kind: "confirm", yes: "OK", onYes: () => {},
+    html: msg || `Couldn't ${what} <span class="note">(${esc(code || "unknown")})</span>.<div class="note">${extra}</div>` });
+}
+
+// The app starts Heroic through its own hidden Steam shortcut, "Heroic (Debug)", so
+// Heroic and its games run as their own Steam app (not inside this one) and with the
+// debug port the install helper needs. It's added automatically on first start;
+// Steam then needs one restart to load it.
+const SHORTCUT_TEXT = { ready: "Ready", restart: "Restart Steam", missing: "Missing", outdated: "Updating…", "no-steam": "Steam not found", error: "Error" };
+let shortcut = { state: null };
+const RESTART_HTML = `<div class="note">Restart Steam to finish setting it up:
+  <b>Steam button → Power → Restart Steam</b> (in Desktop Mode, quit Steam and start it again).</div>`;
+async function checkShortcut(fromMenu = false) {
+  try { shortcut = await api("/api/steam-shortcut", {}); } catch { shortcut = { state: "error", error: "no reply" }; }
+  if (shortcut.state === "missing" || shortcut.state === "outdated") {
+    const updating = shortcut.state === "outdated";
+    try { shortcut = await api("/api/steam-shortcut", { add: true }); } catch { shortcut = { state: "error", error: "no reply" }; }
+    if (shortcut.ok) {
+      openModal({ kind: "confirm", yes: "OK", onYes: () => {}, html: updating
+        ? `Updated the <b>Heroic (Debug)</b> Steam shortcut (Heroic now starts in the background). ${RESTART_HTML}`
+        : `Added a hidden <b>Heroic (Debug)</b> shortcut to Steam.
+        This app uses it to start Heroic for installs and launches. ${RESTART_HTML}` });
+      return;
+    }
+    shortcut.state = "error";
+  }
+  if (shortcut.state === "restart" || (fromMenu && shortcut.state !== "ready"))
+    openModal({ kind: "confirm", yes: "OK", onYes: () => {}, html: shortcut.state === "restart"
+      ? `The <b>Heroic (Debug)</b> shortcut has been added, but Steam hasn't loaded it yet. ${RESTART_HTML}`
+      : `Couldn't set up the <b>Heroic (Debug)</b> Steam shortcut: ${esc(shortcut.error || SHORTCUT_TEXT[shortcut.state] || "unknown")}` });
+  else if (fromMenu)
+    toast("Heroic (Debug) shortcut is set up", 2500);
+}
+checkShortcut();
 
 function focusSearch() {
   els.search.focus();
@@ -525,11 +736,11 @@ function pauseFor(title, sub) {
   $("pausedSub").textContent = sub;
   $("paused").hidden = false;
 }
-function resume() {
+function resume(quiet = false) {
   if (!paused) return;
   paused = null;
   $("paused").hidden = true;
-  toast("Controls resumed", 1200);
+  if (!quiet) toast("Controls resumed", 1200);
 }
 window.addEventListener("blur", () => { if (paused) paused.sawBlur = true; });
 window.addEventListener("focus", () => { if (paused && paused.sawBlur) resume(); });

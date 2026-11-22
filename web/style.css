@@ -203,3 +203,7 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 #diagOut { text-align: left; background: var(--bg); border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.8rem 1rem; margin: 0.9rem 0; font-size: 0.85rem; line-height: 1.4; max-height: 60vh; overflow: auto; white-space: pre-wrap; user-select: text; }
 #diagClose { font: inherit; font-weight: 700; padding: 0.6rem 2.2rem; border-radius: 0.6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
 #diag .phint { margin-top: 0.7rem; color: var(--mute); font-size: 0.85rem; }
+
+/* install options + download progress */
+.opt.info { background: transparent; color: var(--mute); }
+.row .sub .dl, #detail .state .dl { color: var(--accent); }
