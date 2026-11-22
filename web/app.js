@@ -406,13 +406,9 @@ function launchSelected() {
     openModal({
       kind: "confirm", yes: "Install",
       html: `<b>${esc(g.title)}</b> isn't installed.<br>Install it with Heroic?
-        <div class="note">Heroic will open and ask you to confirm. Tap <b>Yes</b> using the touchscreen or right trackpad,
-        then choose the install options in Heroic. Keep Heroic running until the download finishes.</div>`,
-      onYes: async () => {
-        const r = await api("/api/install", { id: g.id });
-        if (r.ok) pauseFor(`Installing ${g.title} in Heroic`, "Heroic is opening.");
-        else toast("Couldn't open Heroic: " + r.error, 6000);
-      },
+        <div class="note">Heroic opens on the game's page with its install dialog, where you choose the options.
+        Keep Heroic running until the download finishes.</div>`,
+      onYes: () => installViaHeroic(g),
     });
     return;
   }
@@ -424,6 +420,30 @@ function launchSelected() {
       else toast("Launch failed: " + r.error, 5000);
     },
   });
+}
+
+// Heroic can't take install requests from other apps (its prompt's Yes button is
+// broken, Heroic issue #6053), so the backend opens the game's page in Heroic's
+// window and presses Install there. This can take a while if Heroic has to start.
+async function installViaHeroic(g) {
+  pauseFor(`Opening ${g.title} in Heroic`, "Starting Heroic… this can take up to a minute.");
+  let r;
+  try { r = await api("/api/install", { id: g.id }); } catch { r = { error: "network" }; }
+  const findIt = `Or open Heroic yourself, search for <b>${esc(g.title)}</b> and press <b>Install</b>.`;
+  const tell = html => { resume(); openModal({ kind: "confirm", yes: "OK", html, onYes: () => {} }); };
+  if (r.result === "dialog" || r.result === "page") {
+    $("pausedTitle").textContent = `Installing ${g.title} in Heroic`;
+    $("pausedSub").textContent = r.result === "dialog" ? "Choose the install options in Heroic's dialog." : "Press Install on the game's page in Heroic.";
+    setTimeout(() => window.shell?.stepAside(), 300);  // so Heroic's window isn't hidden behind ours
+  } else if (r.result === "installed") {
+    resume(); toast(`${g.title} is already installed in Heroic`, 4000);
+  } else if (r.error === "heroic-running") {
+    tell(`Heroic is already open, so this app can't open the install dialog in it.
+      <div class="note">Quit Heroic completely (in Desktop Mode: tray icon → Quit), then try again. ${findIt}</div>`);
+  } else {
+    tell(`Couldn't open the install dialog in Heroic <span class="note">(${esc(r.error || r.result || "unknown")})</span>.
+      <div class="note">${findIt}</div>`);
+  }
 }
 
 function focusSearch() {

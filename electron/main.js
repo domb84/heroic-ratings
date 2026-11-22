@@ -3,7 +3,7 @@
 //
 //   runtime/electron/electron --no-sandbox electron [--windowed]
 "use strict";
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -115,7 +115,8 @@ async function createWindow() {
     backgroundColor: "#0e141b",
     autoHideMenuBar: true,
     icon: path.join(ROOT, "web", "icon.png"),
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, offscreen: !!SCREENSHOT },
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, offscreen: !!SCREENSHOT,
+                      preload: path.join(__dirname, "preload.js") },
   });
   win.setMenu(null);
   // Only ever show our own local page.
@@ -126,6 +127,27 @@ async function createWindow() {
     if (input.key === "F11") { win.setFullScreen(!win.isFullScreen()); e.preventDefault(); }
     if (input.control && input.key.toLowerCase() === "q") { app.quit(); e.preventDefault(); }
   });
+  // "Step aside" for Heroic: leave fullscreen and minimise so Heroic's own windows
+  // (its install dialog) are visible. Fullscreen comes back when the player returns.
+  let steppedAside = false;
+  ipcMain.on("step-aside", e => {
+    if (e.sender !== win.webContents || win.isMinimized()) return;
+    const wasFull = win.isFullScreen();
+    if (wasFull) win.setFullScreen(false);
+    setTimeout(() => {
+      if (win.isDestroyed()) return;
+      win.minimize();
+      steppedAside = wasFull;  // armed only once minimised
+      log("stepped aside for Heroic (minimised:", win.isMinimized() + ")");
+    }, 150);
+  });
+  const comeBack = () => {
+    if (!steppedAside || win.isMinimized()) return;
+    steppedAside = false;
+    win.setFullScreen(true);
+  };
+  win.on("restore", comeBack);
+  win.on("focus", comeBack);
   await win.loadURL(base);
 
   if (SCREENSHOT) {

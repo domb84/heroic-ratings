@@ -75,9 +75,14 @@ To search, choose Menu → Search, then press **Steam + X** for the on-screen ke
 
 ## Installing games
 
-Press **A** on a game that isn't installed and confirm. Heroic opens and asks *"…is not installed, do you wish to install it?"*. That box is a desktop pop-up, so the controller's buttons won't work in it. Tap **Yes** on the touchscreen, or use the right trackpad as a mouse. Then pick the install options in Heroic's own dialog. When the download finishes, the game shows as Installed here within a few seconds.
+Press **A** on a game that isn't installed and confirm. The app opens Heroic on that game's page and presses **Install** there, so Heroic's normal install dialog appears (folder, DLC, language, etc.). The app then minimises itself so Heroic is visible; switch back to it any time and it returns to fullscreen. When the download finishes, the game shows as Installed here within a few seconds.
 
-**In Game Mode, if Heroic wasn't already running, it runs as part of this app.** Closing Heroic Ratings with *Exit game* would then also stop the download. Leave the app open until the download finishes, or start Heroic separately first.
+**Why it works this way:** Heroic 2.22.4 can't take install requests from other apps. Its *"…is not installed, do you wish to install it?"* prompt appears, but its Yes button does nothing ([Heroic issue #6053](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/issues/6053)). As a workaround, the app starts Heroic with Chromium's remote-debugging port (on a free port picked at start-up, `127.0.0.1` only) and uses it to navigate Heroic's own window. Heroic still does all the downloading and installing.
+
+- **Heroic must be closed first.** The debug port can only be turned on when Heroic starts. If Heroic is already open, the app asks you to quit it (Desktop Mode: tray icon → Quit).
+- **While Heroic runs this way**, any program on the device could control it through that port, including your logged-in stores. It's off again the next time Heroic starts normally. Set `HEROIC_RATINGS_HEROIC_DEBUG_PORT` to use a different port.
+
+**In Game Mode, if Heroic wasn't already running, it runs as part of this app.** Closing Heroic Ratings with *Exit game* would then also stop the download. Leave the app open until the download finishes.
 
 ## Wrong or missing matches
 
@@ -102,7 +107,8 @@ python3 heroic_ratings.py [--port 8787] [--heroic-dir PATH] [--kiosk] [--no-sync
 | --- | --- |
 | `HEROIC_RATINGS_DATA` | Where the cache is stored (default `./data`; the AppImage uses `~/.local/share/heroic-ratings`) |
 | `HEROIC_RATINGS_BROWSER` | Browser command for `--kiosk` |
-| `HEROIC_LAUNCH_CMD` | Custom launch command; `{url}` is replaced with the `heroic://launch?...` URL |
+| `HEROIC_LAUNCH_CMD` | Custom launch command; `{url}` is replaced with the `heroic://launch?...` URL (installs then use the plain `heroic://launch` prompt too) |
+| `HEROIC_RATINGS_HEROIC_DEBUG_PORT` | Fixed port for the install workaround (default: a free port Heroic picks) |
 
 The app finds the Heroic folder automatically for both the Flatpak install (`~/.var/app/com.heroicgameslauncher.hgl/config/heroic`) and the native one (`~/.config/heroic`).
 

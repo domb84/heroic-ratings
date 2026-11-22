@@ -74,6 +74,12 @@ class Library(unittest.TestCase):
     def test_weighted_rating(self):
         self.assertLess(h.weighted_rating(100, 5), h.weighted_rating(95, 100000))
 
+    def test_debug_socket_is_local_only(self):
+        with self.assertRaises(OSError):
+            h._MiniWebSocket("ws://192.168.1.5:47317/devtools/page/x")
+        cmd = h.heroic_debug_command.__code__.co_consts
+        self.assertTrue(any("--remote-debugging-address=127.0.0.1" == c for c in cmd))
+
     def test_desktop_layout_detection(self):
         f = h.desktop_layout_likely
         self.assertTrue(f({"XDG_CURRENT_DESKTOP": "KDE"}, deck=True))       # Desktop Mode, started directly

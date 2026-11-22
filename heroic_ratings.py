@@ -789,6 +789,207 @@ def spawn_detached(cmd: list[str]):
                      stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+# ------------------------------------------------------------------- installing via Heroic's window
+#
+# Heroic 2.22.4 can't start an install from outside: its heroic://launch prompt
+# says "install?", but the Yes button is broken (Heroic issue #6053). Instead we
+# start Heroic with Chromium's debug port (bound to 127.0.0.1), open the game's
+# page in Heroic's own window and press its Install button, which shows Heroic's
+# normal install dialog. Heroic does all the work; we only navigate its UI.
+
+# 0 = let Chromium pick a free port; it writes the port to <profile>/DevToolsActivePort.
+# (A fixed port can clash with another program already listening on it.)
+HEROIC_DEBUG_PORT = int(os.environ.get("HEROIC_RATINGS_HEROIC_DEBUG_PORT", "0"))
+
+
+class _MiniWebSocket:
+    """Just enough of a WebSocket client (RFC 6455) to talk to Chromium's debug port."""
+
+    def __init__(self, url: str, timeout: float = 10):
+        u = urllib.parse.urlparse(url)
+        if u.hostname not in ("127.0.0.1", "localhost"):
+            raise OSError("refusing non-local debug socket")
+        self.sock = socket.create_connection((u.hostname, u.port), timeout=timeout)
+        key = __import__("base64").b64encode(os.urandom(16)).decode()
+        self.sock.sendall((f"GET {u.path} HTTP/1.1\r\nHost: {u.hostname}:{u.port}\r\n"
+                           f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                           f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise OSError("debug socket closed during handshake")
+            head += chunk
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise OSError("debug socket refused: " + head.split(b"\r\n", 1)[0].decode(errors="replace"))
+        self.buf = head.split(b"\r\n\r\n", 1)[1]
+
+    def send(self, text: str):
+        data = text.encode()
+        mask = os.urandom(4)
+        n = len(data)
+        hdr = bytes([0x81]) + (bytes([0x80 | n]) if n < 126 else
+                               bytes([0x80 | 126]) + n.to_bytes(2, "big") if n < 65536 else
+                               bytes([0x80 | 127]) + n.to_bytes(8, "big"))
+        self.sock.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    def _read(self, n: int) -> bytes:
+        while len(self.buf) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError("debug socket closed")
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def recv(self) -> str:
+        parts = []
+        while True:
+            b0, b1 = self._read(2)
+            n = b1 & 0x7F
+            if n == 126:
+                n = int.from_bytes(self._read(2), "big")
+            elif n == 127:
+                n = int.from_bytes(self._read(8), "big")
+            payload = self._read(n)
+            op = b0 & 0x0F
+            if op == 0x8:
+                raise OSError("debug socket closed by Heroic")
+            if op in (0x9, 0xA):      # ping/pong: ignore
+                continue
+            parts.append(payload)
+            if b0 & 0x80:
+                return b"".join(parts).decode()
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _heroic_page_ws(port: int) -> str | None:
+    """WebSocket URL of Heroic's main window on its debug port, or None if not reachable."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1.5) as r:
+            targets = json.load(r)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(targets, list):
+        return None
+    targets = [t for t in targets if isinstance(t, dict)]
+    pages = [t for t in targets if t.get("type") == "page" and "index.html" in t.get("url", "")]
+    pages = pages or [t for t in targets if t.get("type") == "page"]
+    return pages[0].get("webSocketDebuggerUrl") if pages else None
+
+
+def _cdp_eval(ws_url: str, expr: str, timeout: float = 20):
+    ws = _MiniWebSocket(ws_url, timeout=timeout)
+    try:
+        ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                            "params": {"expression": expr, "awaitPromise": True, "returnByValue": True}}))
+        while True:
+            msg = json.loads(ws.recv())
+            if msg.get("id") == 1:
+                break
+    finally:
+        ws.close()
+    res = msg.get("result", {})
+    if "exceptionDetails" in res:
+        raise RuntimeError(res["exceptionDetails"].get("text", "script error"))
+    return res.get("result", {}).get("value")
+
+
+# Runs inside Heroic's window. Uses only Heroic's own preload API and router:
+# fetch the game's info, navigate to its page (hash router, page state = gameInfo),
+# then click the page's Install button, which opens Heroic's install dialog.
+_OPEN_INSTALL_JS = r"""
+(async (appName, runner) => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  for (let i = 0; i < 100 && !(window.api && document.querySelector('main.content')); i++) await sleep(200);
+  if (!window.api) return 'not-ready';
+  const gameInfo = await window.api.getGameInfo(appName, runner);
+  if (!gameInfo) return 'unknown-game';
+  if (gameInfo.is_installed) return 'installed';
+  const idx = (window.history.state && window.history.state.idx) || 0;
+  window.history.pushState({ usr: { gameInfo, fromDM: false }, key: 'hr' + Date.now(), idx: idx + 1 },
+                           '', '#/gamepage/' + runner + '/' + encodeURIComponent(appName));
+  window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
+  for (let i = 0; i < 75; i++) {
+    await sleep(200);
+    const btn = document.querySelector('.installButtons button.mainBtn');
+    if (btn) { btn.click(); return 'dialog'; }
+  }
+  return location.hash.includes('/gamepage/') ? 'page' : 'no-page';
+})(%s, %s)
+"""
+
+
+def heroic_running() -> bool:
+    """Is Heroic already running (Flatpak or native)?"""
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ")
+        except OSError:
+            continue
+        if (HEROIC_FLATPAK_ID.encode() in cmd and b"flatpak run" not in cmd) or b"/heroic/heroic" in cmd \
+                or cmd.startswith(b"heroic "):
+            if b"--type=" not in cmd:   # skip Chromium helper processes
+                return True
+    return False
+
+
+def _active_debug_port(heroic_dir: Path | None, newer_than: float = 0) -> int | None:
+    """Port Heroic's Chromium chose, from DevToolsActivePort in its profile (= config) folder."""
+    if HEROIC_DEBUG_PORT:
+        return HEROIC_DEBUG_PORT
+    if not heroic_dir:
+        return None
+    f = heroic_dir / "DevToolsActivePort"
+    try:
+        if f.stat().st_mtime < newer_than:
+            return None
+        return int(f.read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def heroic_debug_command(port: int) -> list[str]:
+    flags = ["--no-sandbox", f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1"]
+    if shutil.which("flatpak") and (HOME / ".var/app" / HEROIC_FLATPAK_ID).is_dir():
+        return ["flatpak", "run", HEROIC_FLATPAK_ID, *flags]
+    if shutil.which("heroic"):
+        return ["heroic", *flags]
+    raise OSError("Heroic not found")
+
+
+def install_via_heroic_ui(runner: str, app_name: str, heroic_dir: Path | None, wait: float = 45) -> dict:
+    """Open Heroic's install dialog for a game. Returns {"result": ...} or {"error": ...}."""
+    port = _active_debug_port(heroic_dir)       # Heroic still running from an earlier install?
+    ws = _heroic_page_ws(port) if port else None
+    if not ws:
+        if heroic_running():
+            return {"error": "heroic-running"}
+        started = time.time()
+        spawn_detached(heroic_debug_command(HEROIC_DEBUG_PORT))
+        while not ws and time.time() < started + wait:
+            time.sleep(0.5)
+            port = _active_debug_port(heroic_dir, newer_than=started - 2)
+            ws = _heroic_page_ws(port) if port else None
+        if not ws:
+            log("install helper: Heroic's debug port never appeared (port file:", port, ")")
+            return {"error": "no-debug-port"}
+    try:
+        result = _cdp_eval(ws, _OPEN_INSTALL_JS % (json.dumps(app_name), json.dumps(runner)), timeout=45)
+    except (OSError, RuntimeError, ValueError) as e:
+        log("install helper failed:", e)
+        return {"error": "script", "detail": str(e)}
+    log("install helper:", result)
+    return {"result": result}
+
+
 # ------------------------------------------------------------------- HTTP server
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -838,6 +1039,12 @@ def make_handler(state: State, on_quit):
                 g = next((g for g in state.games if g["id"] == gid), None)
                 if not g:
                     return self._json({"error": "unknown game"}, 404)
+                if path == "/api/install" and not os.environ.get("HEROIC_LAUNCH_CMD"):
+                    try:
+                        r = install_via_heroic_ui(g["runner"], g["app_name"], state.heroic)
+                    except OSError as e:
+                        return self._json({"error": str(e)}, 500)
+                    return self._json({"ok": "result" in r, **r})
                 try:
                     spawn_detached(heroic_command(g["runner"], g["app_name"],
                                                   show_gui=path == "/api/install"))
