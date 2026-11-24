@@ -216,6 +216,11 @@ class Library(unittest.TestCase):
         self.assertEqual(h._wd_review_count(claim), 33)
         self.assertIsNone(h._wd_review_count({"qualifiers": {}}))
 
+    def test_igdb_videos_are_validated_youtube_ids(self):
+        vs = h._igdb_videos([{"name": "Gameplay video", "video_id": "Yg9w4jRHX8A"},
+                             {"name": "Trailer", "video_id": "bad id\"><script>"}, {"video_id": "WNNHAHZgKkU"}, "junk"])
+        self.assertEqual(vs, [{"name": "Gameplay video", "id": "Yg9w4jRHX8A"}, {"name": "Video", "id": "WNNHAHZgKkU"}])
+
     def test_desktop_layout_detection(self):
         f = h.desktop_layout_likely
         self.assertTrue(f({"XDG_CURRENT_DESKTOP": "KDE"}, deck=True))       # Desktop Mode, started directly

@@ -20,7 +20,7 @@ const PERSPECTIVES = { "Any": null, "First person": "First person", "Third perso
 // ---------------------------------------------------------------- state
 const S = {
   games: [], view: [], sel: 0, version: -1, progress: {},
-  sortIdx: 0, dir: -1, genre: null, store: "All", installedOnly: false, hideUnrated: false, style: "Any", persp: "Any", query: "",
+  sortIdx: 0, dir: -1, genre: null, store: "All", installedOnly: false, hideUnrated: false, style: "Any", persp: "Any", trailerSound: false, query: "",
   modal: null,
 };
 const $ = id => document.getElementById(id);
@@ -29,7 +29,7 @@ const els = { list: $("list"), detail: $("detail"), search: $("search"), overlay
 function loadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem("hr-prefs") || "{}");
-    for (const k of ["sortIdx", "dir", "genre", "store", "installedOnly", "hideUnrated", "style", "persp"]) if (k in p) S[k] = p[k];
+    for (const k of ["sortIdx", "dir", "genre", "store", "installedOnly", "hideUnrated", "style", "persp", "trailerSound"]) if (k in p) S[k] = p[k];
     if (!(S.style in STYLES)) S.style = "Any";
     if (!(S.persp in PERSPECTIVES)) S.persp = "Any";
     if (!SORTS[S.sortIdx]) S.sortIdx = 0;
@@ -37,8 +37,8 @@ function loadPrefs() {
 }
 function savePrefs() {
   try {
-    const { sortIdx, dir, genre, store, installedOnly, hideUnrated, style, persp } = S;
-    localStorage.setItem("hr-prefs", JSON.stringify({ sortIdx, dir, genre, store, installedOnly, hideUnrated, style, persp }));
+    const { sortIdx, dir, genre, store, installedOnly, hideUnrated, style, persp, trailerSound } = S;
+    localStorage.setItem("hr-prefs", JSON.stringify({ sortIdx, dir, genre, store, installedOnly, hideUnrated, style, persp, trailerSound }));
   } catch (e) { /* ignore */ }
 }
 
@@ -135,11 +135,10 @@ function rowEl(g) {
 
 function rowHTML(g) {
   const dl = downloadText(g);
-  const sub = [g.store, g.installed && !dl ? '<span class="inst">● Installed</span>' : "", dl ? `<span class="dl">${esc(dl)}</span>` : "", esc(g.genres.slice(0, 3).join(", "))].filter(Boolean).join(" · ");
+  const badge = dl ? `<span class="badge dl">${esc(dl)}</span>` : g.installed ? '<span class="badge inst">Installed</span>' : "";
   return `<div class="row" data-id="${esc(g.id)}">
     ${g.art ? `<img loading="lazy" decoding="async" src="${esc(img(g.art, 120))}" alt="">` : '<div class="noimg"></div>'}
-    <div class="t"><div class="name">${esc(g.title)}</div><div class="sub">${sub}</div></div>
-    ${lengthHTML(g)}
+    <div class="t"><div class="name">${esc(g.title)}</div>${badge}</div>
     <div class="score"></div>
   </div>`;
 }
@@ -147,17 +146,12 @@ function rowHTML(g) {
 // How long to beat (IGDB): "29h", "4½h", "190h".
 const fmtHours = n => n == null ? "—" : n >= 100 ? Math.round(n) + "h" : n < 1 ? Math.max(1, Math.round(n * 60)) + "m"
   : (Math.round(n * 2) / 2).toString().replace(".5", "½") + "h";
-function lengthHTML(g) {
-  const t = g.length;
-  if (!t || t.main == null) return `<div class="len none"><div class="t">—</div><div class="lbl">${t ? "no main time" : "no data"}</div></div>`;
-  return `<div class="len"><div class="t">${fmtHours(t.main)}</div><div class="lbl">main story</div></div>`;
-}
 
 // The one value shown in the list: whatever the current sort orders by.
 const mcScoreClass = m => m >= 75 ? "c-pos" : m >= 50 ? "c-mix" : "c-neg";
-function sortValue(g) {
+function sortValue(g, key = SORTS[S.sortIdx].key) {
   const none = label => ({ big: "—", cls: "c-na", label });
-  switch (SORTS[S.sortIdx].key) {
+  switch (key) {
     case "percent":
       if (g.percent != null) return { big: g.percent + "%", cls: scoreClass(g.percent), label: g.label };
       return none(g.critic != null ? "No Steam reviews" : unratedReason(g));
@@ -210,6 +204,149 @@ function renderAll() {
   select(S.sel, true);
 }
 
+// ---------------------------------------------------------------- videos
+// Steam's store videos (HLS) and IGDB's YouTube videos, fetched once a game has been
+// selected for a moment, and played in the details pane: muted and looping by default.
+// R3 / v toggles sound (remembered), right stick ◀ ▶ switches video, tapping a thumbnail
+// plays that one.
+S.videos = {};            // game id -> [{src, name, thumb, url | id}]
+let videoTimer = null;
+let inline = null;        // { gid, i, hls }
+let hlsLoading = null;
+function loadHls() {
+  if (window.Hls) return Promise.resolve();
+  return hlsLoading ||= new Promise((ok, fail) => {
+    const sc = document.createElement("script");
+    sc.src = "vendor/hls.min.js"; sc.onload = ok; sc.onerror = fail;
+    document.head.appendChild(sc);
+  });
+}
+async function loadVideos(g) {
+  if (S.videos[g.id]) return S.videos[g.id];
+  try { S.videos[g.id] = (await api("/api/videos", { id: g.id })).videos || []; } catch { return []; }
+  return S.videos[g.id];
+}
+function queueVideos(g) {   // only once the selection has rested for a moment
+  clearTimeout(videoTimer);
+  stopInline();
+  if (!g) return;
+  videoTimer = setTimeout(async () => {
+    await loadVideos(g);
+    if (S.view[S.sel]?.id !== g.id) return;
+    renderVideoStrip(g);
+    playInline(g, 0);
+  }, 600);
+}
+function stopInline() {
+  if (inline?.hls) inline.hls.destroy();
+  inline = null;
+  const box = document.getElementById("vbox");
+  if (box) box.querySelectorAll("video, iframe").forEach(el => { if (el.pause) el.pause(); el.remove(); });
+}
+async function playInline(g, i) {
+  const vs = S.videos[g.id] || [];
+  const box = document.getElementById("vbox");
+  if (!vs.length || !box || box.dataset.id !== g.id) return;
+  stopInline();
+  i = (i + vs.length) % vs.length;
+  const v = vs[i], me = { gid: g.id, i, hls: null };
+  inline = me;
+  box.classList.add("playing");
+  box.querySelector(".cap").innerHTML = `${esc(v.name)} · ${i + 1}/${vs.length} · <span class="btn sh">R3</span> ${S.trailerSound ? "Mute" : "Sound"}`;
+  markCarousel(i, vs.length);
+  if (v.src === "youtube") {
+    const f = document.createElement("iframe");
+    f.allow = "autoplay; encrypted-media";
+    f.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(v.id)}?autoplay=1&mute=${S.trailerSound ? 0 : 1}` +
+            `&loop=1&playlist=${encodeURIComponent(v.id)}&controls=0&enablejsapi=1&playsinline=1&rel=0&origin=${encodeURIComponent(location.origin)}`;
+    box.prepend(f);
+    return;
+  }
+  const video = document.createElement("video");
+  Object.assign(video, { muted: !S.trailerSound, loop: true, playsInline: true, autoplay: true });
+  box.prepend(video);
+  if (video.canPlayType("application/vnd.apple.mpegurl")) video.src = v.url;
+  else {
+    try { await loadHls(); } catch { return; }
+    if (inline !== me) return;
+    me.hls = new Hls({ capLevelToPlayerSize: true });
+    me.hls.loadSource(v.url);
+    me.hls.attachMedia(video);
+  }
+  if (!paused && document.hasFocus()) video.play().catch(() => {});
+}
+function inlineVideo() { return document.querySelector("#vbox video"); }
+function toggleSound() {
+  S.trailerSound = !S.trailerSound; savePrefs();
+  const v = inlineVideo(), f = document.querySelector("#vbox iframe");
+  if (v) v.muted = !S.trailerSound;
+  if (f) f.contentWindow?.postMessage(JSON.stringify({ event: "command", func: S.trailerSound ? "unMute" : "mute", args: [] }), "*");
+  const cap = document.querySelector("#vbox .cap .btn");
+  if (cap) cap.nextSibling.textContent = S.trailerSound ? " Mute" : " Sound";
+  toast(S.trailerSound ? "Trailer sound on" : "Trailer sound off", 1200);
+}
+let lastStep = 0;
+function stepVideo(d) {
+  const g = S.view[S.sel], now = performance.now();
+  if (now - lastStep < 350) return;   // holding ◀ ▶ shouldn't flick through videos
+  lastStep = now;
+  if (g && inline?.gid === g.id) playInline(g, inline.i + d);
+}
+function pauseInline(on) {   // while Heroic or a game is in front, or the app isn't focused
+  const v = inlineVideo(), f = document.querySelector("#vbox iframe");
+  if (v) on ? v.pause() : v.play().catch(() => {});
+  if (f) f.contentWindow?.postMessage(JSON.stringify({ event: "command", func: on ? "pauseVideo" : "playVideo", args: [] }), "*");
+}
+window.addEventListener("blur", () => pauseInline(true));
+window.addEventListener("focus", () => { if (!paused) pauseInline(false); });
+// The thumbnail strip is a carousel: no scrollbar, it slides to keep the playing video
+// centred, and fades with ‹ › show when there are more thumbnails off to a side.
+function markCarousel(i, n) {
+  const strip = document.querySelector("#vstrip .vthumbs");
+  if (!strip) return;
+  const thumbs = strip.querySelectorAll(".vthumb");
+  thumbs.forEach((t, k) => t.classList.toggle("on", k === i));
+  const t = thumbs[i];
+  if (t) strip.scrollTo({ left: t.offsetLeft - (strip.clientWidth - t.offsetWidth) / 2, behavior: "smooth" });
+  const pos = document.querySelector("#vstrip .vpos");
+  if (pos) pos.textContent = `· ${i + 1} / ${n} · ◀ ▶ to switch`;
+}
+function updateCarouselEdges(strip) {
+  const car = strip.parentElement;
+  car.classList.toggle("more-l", strip.scrollLeft > 4);
+  car.classList.toggle("more-r", strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+}
+function renderVideoStrip(g) {
+  const el = document.getElementById("vstrip");
+  const vs = S.videos[g.id] || [];
+  if (!el || el.dataset.id !== g.id) return;
+  el.innerHTML = vs.length > 1 ? `<div class="hl-title">Videos <span class="vpos">· ◀ ▶ to switch</span></div>
+    <div class="vcar"><div class="vthumbs">${vs.map((v, i) =>
+    `<div class="vthumb" data-i="${i}"><img loading="lazy" src="${esc(v.thumb)}" alt=""><span class="vsrc ${v.src}">${v.src === "steam" ? "Steam" : "YouTube"}</span><span class="vname">${esc(v.name)}</span></div>`).join("")}</div>
+    <span class="varrow l" data-d="-1">‹</span><span class="varrow r" data-d="1">›</span></div>` : "";
+  const strip = el.querySelector(".vthumbs");
+  if (strip) {
+    strip.addEventListener("scroll", () => updateCarouselEdges(strip), { passive: true });
+    updateCarouselEdges(strip);
+    if (inline?.gid === g.id) markCarousel(inline.i, vs.length);
+  }
+  if (!vs.length) {
+    const cap = document.querySelector("#vbox .cap");
+    if (cap) cap.textContent = "No videos";
+  }
+}
+els.detail.addEventListener("click", e => {
+  const g = S.view[S.sel];
+  const t = e.target.closest(".vthumb");
+  if (t && g) return playInline(g, +t.dataset.i);
+  const arrow = e.target.closest(".varrow");
+  if (arrow) { lastStep = 0; return stepVideo(+arrow.dataset.d); }
+  if (e.target.closest("#vbox")) {   // tap the video: play / pause
+    const v = inlineVideo();
+    if (v) v.paused ? v.play().catch(() => {}) : v.pause();
+  }
+});
+
 function select(i, force) {
   if (!S.view.length) return;
   i = Math.max(0, Math.min(S.view.length - 1, i));
@@ -222,34 +359,105 @@ function select(i, force) {
     row.scrollIntoView({ block: "nearest" });
   }
   renderDetail(S.view[i]);
+  queueVideos(S.view[i]);   // after renderDetail, which clears the old trailer
 }
 
+// The details pane: the trailer (top left) with the title and four stat tiles beside it
+// (the first tile is the value the list is sorted by, so the two always agree), and
+// everything else below.
+function styleTile(g) {
+  const m = g.modes || [];
+  const v = m.includes("Co-operative") ? "Co-op" : m.includes("Split screen") ? "Split screen"
+    : m.includes("Multiplayer") && !m.includes("Single player") ? "Multiplayer" : m.includes("Single player") ? "Single player" : null;
+  return v && { big: v, cls: "c-plain small", label: "Play style" };
+}
+// The score tiles. Each kind of score appears once, from the source in use, with its
+// review count: user score = Steam % (or IGDB users for games without Steam reviews),
+// critic score = the one the app chose (Metascore, IGDB or OpenCritic).
+const fmtCount = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : (n || 0).toLocaleString();
+function scoreTile(g, key) {
+  switch (key) {
+    case "rating":
+      if (g.percent != null && g.rating != null) return { big: Math.round(g.rating), cls: scoreClass(g.rating), label: "Rating" };
+      if (g.critic != null) return { big: g.critic, cls: scoreClass(g.critic), label: `Rating · ${g.critic_by}${g.critic_n ? ` · ${fmtCount(g.critic_n)} reviews` : ""}` };
+      if (g.rating_src === "igdb-user") return { big: g.igdb.user, cls: scoreClass(g.igdb.user), label: `Rating · IGDB users · ${fmtCount(g.igdb.user_n)}` };
+      return null;
+    case "percent":
+      if (g.percent != null) return { big: g.percent + "%", cls: scoreClass(g.percent), label: `Steam · ${fmtCount(g.reviews)} reviews` };
+      if (g.igdb?.user && g.rating_src !== "igdb-user") return { big: g.igdb.user, cls: scoreClass(g.igdb.user), label: `IGDB users · ${fmtCount(g.igdb.user_n)} ratings` };
+      return null;
+    case "metascore": {
+      const c = g.critic_score ?? g.metascore;
+      if (!c || (g.percent == null && g.rating_src === "critic" && c === g.critic)) return null;   // already the rating
+      return { big: c, cls: mcScoreClass(c), label: g.critic_src && g.critic_src !== "Metascore" ? `${g.critic_by} · ${fmtCount(g.critic_n)} reviews` : "Metascore" };
+    }
+    case "reviews": return g.reviews ? { big: fmtCount(g.reviews), cls: "c-plain", label: "Steam reviews" } : null;
+    case "year": return g.year ? { big: g.year, cls: "c-plain", label: "Released" } : null;
+    case "style": return styleTile(g);
+  }
+  return null;
+}
+function detailTiles(g) {
+  const cur = SORTS[S.sortIdx].key === "title" ? "rating" : SORTS[S.sortIdx].key;
+  // first tile = exactly what the list shows for this sort (richer label when it's the same value)
+  const sv = sortValue(g, cur), st = scoreTile(g, cur);
+  const same = st && String(st.big) === String(sv.big);
+  const tiles = [{ ...(same ? st : sv), cur: true }];
+  // a game without Steam reviews is rated by its critic score: don't show that score twice
+  const ratingIsCritic = g.percent == null && g.rating_src === "critic";
+  for (const k of ["rating", "percent", "metascore", "style", "year"]) {
+    if (tiles.length >= 4) break;
+    if (k === cur && same) continue;
+    if (k === "rating" && cur === "metascore" && ratingIsCritic) continue;
+    const t = scoreTile(g, k);
+    if (t) tiles.push(t);
+  }
+  return tiles;
+}
+
+// Where the Steam match came from, only when that's worth knowing (it helps spot a wrong match).
+function matchNote(g, showSteamName) {
+  if (!g.appid) return g.rating == null && g.percent == null ? `<div class="matched">${esc(unratedReason(g) || "Not on Steam")}</div>` : "";
+  const via = g.via === "wikidata" ? " (found via Wikidata)" : g.via === "igdb" ? " (found via IGDB)" : "";
+  if (!showSteamName && !via && !g.override) return "";
+  return `<div class="matched">Steam match: ${esc(g.steam_name || "app " + g.appid)}${via}${g.override ? " (manual)" : ""}</div>`;
+}
+
+// How long to beat (IGDB), as a row of three small tiles under the score tiles.
+function lengthsHTML(g) {
+  const L = g.length;
+  if (!document.body.classList.contains("lengths") || !L) return "";
+  return `<div class="lenhead">How long to beat</div><div class="lens">
+    <div><b>${fmtHours(L.main)}</b><small>Main story</small></div>
+    <div><b>${fmtHours(L.extra)}</b><small>+ Extras</small></div>
+    <div><b>${fmtHours(L.comp)}</b><small>100%</small></div></div>`;
+}
 function renderDetail(g) {
-  const p = g.percent;
-  const sc = scoreParts(g);
+  stopInline();
+  const tiles = detailTiles(g);
   const showSteamName = g.steam_name && norm(g.steam_name) !== norm(g.title);
-  const genres = g.genres;
-  const others = g.tags.filter(t => !genres.includes(t)).slice(0, 8);
+  const status = downloadText(g, true) ? `<span class="dl">${esc(downloadText(g, true))}</span>` : g.installed ? '<span class="inst">● Installed</span>' : "Not installed";
   els.detail.innerHTML = `
-    ${g.art ? `<img class="cover" src="${esc(img(g.art, 480))}" alt="">` : ""}
-    <h2>${esc(g.title)}</h2>
-    <div class="matched">${g.appid ? (showSteamName ? "Steam match: " + esc(g.steam_name) : "Steam app " + g.appid) + (g.via === "wikidata" ? " (found via Wikidata)" : g.via === "igdb" ? " (found via IGDB)" : "") + (g.override ? " (manual)" : "") : g.critic != null ? "Not on Steam" : esc(unratedReason(g))}</div>
-    <div class="bigscore">
-      <div><div class="pct ${sc.cls}">${sc.big}</div></div>
-      <div><div class="lbl ${sc.cls}">${esc(sc.label)}</div>
-        <div class="n">${g.reviews ? g.reviews.toLocaleString() + " Steam reviews" : p == null && g.critic != null ? "Critic average out of 100" : ""}</div>
-        <div class="n">${p != null && g.rating != null ? "Weighted rating " + g.rating.toFixed(1) : ""}</div>
-        <div class="n">${p != null && g.critic != null ? `Critics: ${g.critic} (${esc(g.critic_by)}${g.critic_n ? `, ${g.critic_n} reviews` : ""})` : ""}</div></div>
-      ${g.metascore ? `<div class="meta ${mcClass(g.metascore)}" title="Metascore">${g.metascore}</div>` : ""}
+    <div class="top">
+      <div id="vbox" data-id="${esc(g.id)}">
+        ${g.art ? `<img class="poster" src="${esc(img(g.art, 480))}" alt="">` : ""}
+        <div class="cap">${S.videos[g.id] && !S.videos[g.id].length ? "No videos" : "Loading trailer…"}</div>
+      </div>
+      <div class="info">
+        <h2>${esc(g.title)}</h2>
+        <div class="sub">${[g.year, g.devs?.[0]].filter(Boolean).map(esc).join(" · ")}</div>
+        <div class="tiles">${tiles.map(t => `<div class="${t.cur ? "cur" : ""}"><b class="${t.cls}">${esc(String(t.big))}</b><small>${esc(t.label || "")}</small></div>`).join("")}</div>
+        ${lengthsHTML(g)}
+        <div class="state">${status} · ${esc(g.store)}</div>
+      </div>
     </div>
-    <div class="facts">${g.year ? `Released <b>${g.year}</b>` : ""}${g.year && g.devs?.length ? " · " : ""}${g.devs?.length ? `<b>${esc(g.devs.slice(0, 2).join(", "))}</b>` : ""}</div>
-    ${!document.body.classList.contains("lengths") || !g.length && !g.igdb ? "" : `<div class="hl-title">How long to beat <span>· IGDB</span></div>
-    ${g.length ? `<div class="hl-box"><div><b>${fmtHours(g.length.main)}</b><small>Main story</small></div><div><b>${fmtHours(g.length.extra)}</b><small>Main + extras</small></div><div><b>${fmtHours(g.length.comp)}</b><small>Completionist</small></div></div>`
-             : `<div class="hl-box"><div><small>No time on IGDB</small></div></div>`}`}
+    ${g.desc ? `<p class="desc">${esc(g.desc)}</p>` : ""}
+    ${matchNote(g, showSteamName)}
+    <div id="vstrip" data-id="${esc(g.id)}"></div>
     ${igdbDetailHTML(g)}
-    <div class="tags">${genres.map(t => `<span class="tag g">${esc(t)}</span>`).join("")}${others.map(t => `<span class="tag">${esc(t)}</span>`).join("")}</div>
-    ${g.desc ? `<p>${esc(g.desc)}</p>` : ""}
-    <div class="state">${downloadText(g, true) ? `<span class="dl">${esc(downloadText(g, true))}</span>` : g.installed ? '<span class="inst">● Installed</span>' : "Not installed"} · ${esc(g.store)}</div>`;
+    ${g.genres.length ? `<div class="tags">${g.genres.map(t => `<span class="tag g">${esc(t)}</span>`).join("")}</div>` : ""}`;
+  els.detail.scrollTop = 0;
+  if (S.videos[g.id]) renderVideoStrip(g);
 }
 
 // IGDB extras in the details panel: its scores, play styles, multiplayer, series, similar games.
@@ -270,15 +478,12 @@ function gameLinks(ids) {
 function igdbDetailHTML(g) {
   const ig = g.igdb;
   if (!ig) return "";
-  const scores = [ig.critic ? `critics <b>${ig.critic}</b> <small>(${ig.critic_n} review${ig.critic_n === 1 ? "" : "s"})</small>` : "",
-                  ig.user ? `users <b>${ig.user}</b> <small>(${ig.user_n.toLocaleString()} rating${ig.user_n === 1 ? "" : "s"})</small>` : ""].filter(Boolean);
   const style = [...(g.modes || []).map(m => m.replace("Massively Multiplayer Online (MMO)", "MMO").replace("Co-operative", "Co-op")),
                  ...(g.persp || []).map(p => p.replace("Bird view / Isometric", "Isometric"))];
   const mp = mpText(ig.mp || {});
   const series = ig.same_series?.length ? gameLinks(ig.same_series) : "";
   const similar = ig.similar?.length ? gameLinks(ig.similar) : "";
   return `
-    ${scores.length ? `<div class="ig-line">IGDB: ${scores.join(" · ")}</div>` : ""}
     ${style.length ? `<div class="ig-line">${esc(style.join(" · "))}</div>` : ""}
     ${mp ? `<div class="ig-line">${esc(mp)}</div>` : ""}
     ${series ? `<div class="hl-title">Same series in your library${ig.series[0] ? ` <span>· ${esc(ig.series[0])}</span>` : ""}</div><div class="glinks">${series}</div>` : ""}
@@ -370,6 +575,7 @@ function closeModal() {
 function renderModal() {
   const m = S.modal;
   els.modal.className = "modal " + (m.kind || "");
+
   if (m.kind === "confirm") {
     els.modal.innerHTML = `<div class="q">${m.html}</div>
       <div class="hint"><span><span class="btn a">A</span>${esc(m.yes || "OK")}</span><span><span class="btn b">B</span>Cancel</span></div>`;
@@ -385,6 +591,7 @@ function renderModal() {
 
 function modalInput(a) {
   const m = S.modal;
+
   if (m.kind === "confirm") {
     if (a === "a") { closeModal(); m.onYes(); }
     else if (a === "b" || a === "start") closeModal();
@@ -454,6 +661,7 @@ function openMenu() {
         { label: "Perspective", value: S.persp, change: d => { S.persp = cycle(Object.keys(PERSPECTIVES), S.persp, d); refilter(); } },
       ] : []),
       { label: "Search…", activate: () => { closeModal(); focusSearch(); } },
+      { label: "Trailer sound", value: S.trailerSound ? "On" : "Off", change: () => { S.trailerSound = !S.trailerSound; savePrefs(); const v = inlineVideo(); if (v) v.muted = !S.trailerSound; } },
       { label: "Controller test", activate: () => { closeModal(); openDiag(); } },
       ...(g && g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
       ...(g && g.appid ? [{ label: `Wrong Steam match for “${g.title}”`, activate: () => wrongMatch(g) }] : []),
@@ -783,8 +991,10 @@ function input(a) {
   switch (a) {
     case "up": select(S.sel - 1); break;
     case "down": select(S.sel + 1); break;
-    case "left": case "lt": select(S.sel - pageSize()); break;
-    case "right": case "rt": select(S.sel + pageSize()); break;
+    case "lt": select(S.sel - pageSize()); break;
+    case "rt": select(S.sel + pageSize()); break;
+    case "left": stepVideo(-1); break;     // D-pad ◀ ▶: previous / next video
+    case "right": stepVideo(1); break;
     case "home": select(0); break;
     case "end": select(S.view.length - 1); break;
     case "a": launchSelected(); break;
@@ -801,11 +1011,15 @@ function input(a) {
     case "lb": cycleGenre(-1); break;
     case "rb": cycleGenre(1); break;
     case "start": openMenu(); break;
+    case "r3": toggleSound(); break;
+    case "vprev": stepVideo(-1); break;
+    case "vnext": stepVideo(1); break;
   }
 }
 
 // Gamepad (standard mapping; Steam Input presents an Xbox-style pad)
-const PAD = { a: 0, b: 1, x: 2, y: 3, lb: 4, rb: 5, lt: 6, rt: 7, select: 8, start: 9, up: 12, down: 13, left: 14, right: 15 };
+const PAD = { a: 0, b: 1, x: 2, y: 3, lb: 4, rb: 5, lt: 6, rt: 7, select: 8, start: 9, r3: 11, up: 12, down: 13, left: 14, right: 15,
+              vprev: -1, vnext: -1 };   // right stick ◀ ▶ (set from the axis in readPads)
 const REPEAT = new Set(["up", "down", "left", "right", "lt", "rt"]);
 const held = {};
 function readPads(scroll = true) {
@@ -822,8 +1036,11 @@ function readPads(scroll = true) {
     if (ay > 0.55) st.down = true;
     if (ax < -0.7) st.left = true;
     if (ax > 0.7) st.right = true;
-    const ry = p.axes[3] || 0;  // right stick scrolls the details panel
+    const ry = p.axes[3] || 0;  // right stick: up/down scrolls the details pane, left/right switches video
     if (scroll && Math.abs(ry) > 0.25) els.detail.scrollTop += ry * 14;
+    const rx = p.axes[2] || 0;
+    if (rx < -0.7 && Math.abs(ry) < 0.5) st.vprev = true;
+    if (rx > 0.7 && Math.abs(ry) < 0.5) st.vnext = true;
   }
   return st;
 }
@@ -837,6 +1054,7 @@ function safeInput(a) {
 // pause until the user is back here.
 let paused = null; // { sawBlur, comboStart }
 function pauseFor(title, sub) {
+  pauseInline(true);
   paused = { sawBlur: !document.hasFocus(), comboStart: 0 };
   $("pausedTitle").textContent = title;
   $("pausedSub").textContent = sub;
@@ -846,6 +1064,7 @@ function resume(quiet = false) {
   if (!paused) return;
   paused = null;
   $("paused").hidden = true;
+  if (document.hasFocus()) pauseInline(false);
   if (!quiet) toast("Controls resumed", 1200);
 }
 window.addEventListener("blur", () => { if (paused) paused.sawBlur = true; });
@@ -947,7 +1166,7 @@ const KEYS = {
   ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "a", " ": "y",
   Control: "lb", Alt: "rb",
   Escape: "start", Backspace: "b", x: "x", s: "x", y: "y", g: "y", q: "lb", "[": "lb", e: "rb", "]": "rb",
-  PageUp: "lt", PageDown: "rt", r: "select", m: "start", Tab: "select", Home: "home", End: "end",
+  PageUp: "lt", PageDown: "rt", r: "select", m: "start", Tab: "select", Home: "home", End: "end", v: "r3",
 };
 document.addEventListener("keydown", e => {
   if (diag) {  // controller test: log keys, act on nothing (holding Enter for 2 s closes)

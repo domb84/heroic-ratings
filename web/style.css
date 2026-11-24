@@ -78,7 +78,7 @@ header {
 main { flex: 1; display: flex; min-height: 0; }
 #list { flex: 1; overflow-y: auto; padding: 0.5rem; scrollbar-width: thin; scrollbar-color: var(--line) transparent; outline: none; }
 #detail {
-  width: 23rem; flex: none; background: var(--panel); border-left: 1px solid var(--line);
+  width: 62%; flex: none; background: var(--panel); border-left: 1px solid var(--line);
   overflow-y: auto; padding: 1rem; scrollbar-width: none;
 }
 
@@ -209,12 +209,6 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 .row .sub .dl, #detail .state .dl { color: var(--accent); }
 
 /* how long to beat (only with an IGDB key) */
-body.lengths .row { grid-template-columns: 2.6rem minmax(0, 1fr) 5.2rem 9rem; }
-body:not(.lengths) .row .len { display: none; }
-.len { text-align: right; line-height: 1.1; }
-.len .t { font-size: 1.15rem; font-weight: 700; }
-.len .lbl { font-size: 0.68rem; color: var(--mute); white-space: nowrap; }
-.len.none .t { color: var(--line); }
 #detail .hl-title { margin-top: .7rem; font-size: .8rem; color: var(--mute); text-transform: uppercase; letter-spacing: .05em; }
 #detail .hl-title span { text-transform: none; letter-spacing: 0; }
 #detail .hl-box { display: flex; gap: .5rem; margin: .4rem 0 .5rem; }
@@ -229,3 +223,66 @@ body:not(.lengths) .row .len { display: none; }
 #detail .glink { background: var(--panel2); border: 1px solid var(--line); border-radius: .35rem; padding: .15rem .5rem;
                  font-size: .82rem; cursor: pointer; }
 #detail .glink:hover { border-color: var(--accent); }
+
+/* videos: thumbnails in the details panel, fullscreen player */
+#detail .vthumbs { display: flex; gap: .4rem; overflow-x: auto; padding-bottom: .3rem; margin: .35rem 0 .4rem; }
+#detail .vthumb { position: relative; flex: 0 0 8.5rem; cursor: pointer; border-radius: .35rem; overflow: hidden; background: var(--panel2); }
+#detail .vthumb img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; }
+#detail .vthumb .vsrc { position: absolute; top: .2rem; left: .2rem; font-size: .62rem; padding: 0 .3rem; border-radius: .2rem; background: #000a; }
+#detail .vthumb .vsrc.youtube { background: #c00c; }
+#detail .vthumb .vname { display: block; font-size: .7rem; color: var(--mute); padding: .15rem .3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* layout: slim list rows, big details panel (trailer first) */
+.row { grid-template-columns: 2.2rem minmax(0, 1fr) 4.6rem !important; padding-top: .3rem !important; padding-bottom: .3rem !important; }
+.row img, .row .noimg { width: 2.2rem !important; height: 2.8rem !important; }
+.row .t { display: flex; align-items: center; gap: .45rem; min-width: 0; }
+.row .name { min-width: 0; }
+.row .badge { flex: none; font-size: .66rem; padding: .05rem .4rem; border-radius: 999px; background: var(--panel2); }
+.row .badge.inst { color: #7bd88f; } .row .badge.dl { color: var(--accent); }
+.row .score .lbl { display: none; }
+.row { contain-intrinsic-size: auto 3.5rem; }
+
+/* details pane: trailer (top left) with title + tiles beside it, details below */
+#detail .top { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); gap: .8rem; align-items: start; }
+#vbox { position: relative; aspect-ratio: 16 / 9; border-radius: .45rem; overflow: hidden; background: #05080b;
+        display: flex; align-items: center; justify-content: center; cursor: pointer; }
+#vbox video, #vbox iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; object-fit: cover; background: #000; }
+#vbox iframe { pointer-events: none; }   /* taps go to the app, not YouTube's own controls */
+#vbox img.poster { height: 100%; width: auto; object-fit: contain; opacity: .55; }
+#vbox.playing img.poster { display: none; }
+#vbox .cap { position: absolute; left: .45rem; bottom: .4rem; font-size: .74rem; background: #000b; padding: .1rem .45rem; border-radius: .25rem;
+             max-width: calc(100% - .9rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; z-index: 1; }
+#detail .info h2 { margin: 0; font-size: 1.25rem; line-height: 1.2; }
+#detail .info .sub { font-size: .8rem; color: var(--mute); margin: .2rem 0 .5rem; }
+#detail .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+#detail .tiles div { background: var(--panel2); border-radius: .4rem; padding: .35rem .4rem; text-align: center; min-width: 0; }
+#detail .tiles div.cur { outline: 1px solid var(--accent); }
+#detail .tiles b { display: block; font-size: 1.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#detail .tiles b.small { font-size: .95rem; line-height: 1.8rem; }
+#detail .tiles small { display: block; font-size: .66rem; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#detail .info .state { margin-top: .5rem; font-size: .8rem; }
+#detail .desc { font-size: .88rem; color: #c9d4de; margin: .65rem 0 .35rem; line-height: 1.4; }
+#detail .matched { font-size: .78rem; }
+#detail .vthumb.on { outline: 2px solid var(--accent); }
+
+/* score tiles: labels wrap onto two lines instead of being cut off */
+#detail .tiles div { display: flex; flex-direction: column; justify-content: center; }
+#detail .tiles small { white-space: normal; line-height: 1.15; overflow: hidden; text-overflow: clip;
+                       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* how long to beat, under the score tiles */
+#detail .lenhead { font-size: .66rem; color: var(--mute); text-transform: uppercase; letter-spacing: .05em; margin: .55rem 0 .25rem; }
+#detail .lens { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .4rem; }
+#detail .lens div { background: var(--panel2); border-radius: .4rem; padding: .3rem; text-align: center; min-width: 0; }
+#detail .lens b { display: block; font-size: 1.05rem; }
+#detail .lens small { display: block; font-size: .62rem; color: var(--mute); white-space: nowrap; }
+
+/* video carousel (no scrollbar; fades + arrows when more thumbnails are off to a side) */
+#detail .vcar { position: relative; margin: .35rem 0 .4rem; }
+#detail .vcar .vthumbs { margin: 0; overflow-x: auto; scrollbar-width: none; scroll-snap-type: x proximity; padding: 2px; }
+#detail .vcar .vthumbs::-webkit-scrollbar { display: none; }
+#detail .vcar .vthumb { scroll-snap-align: center; }
+#detail .vcar .varrow { position: absolute; top: 0; bottom: 0; width: 2.4rem; display: none; align-items: center;
+                         font-size: 1.8rem; cursor: pointer; z-index: 1; color: #fff; }
+#detail .vcar .varrow.l { left: 0; justify-content: flex-start; padding-left: .2rem; background: linear-gradient(90deg, var(--panel) 20%, transparent); }
+#detail .vcar .varrow.r { right: 0; justify-content: flex-end; padding-right: .2rem; background: linear-gradient(270deg, var(--panel) 20%, transparent); }
+#detail .vcar.more-l .varrow.l, #detail .vcar.more-r .varrow.r { display: flex; }

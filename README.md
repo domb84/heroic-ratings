@@ -8,6 +8,7 @@ Browse your Heroic Games Launcher library (Epic, GOG and Amazon games, plus side
 - **Genre filter** uses Steam's genre tags.
 - **Sort** by weighted rating, % positive, popularity, critic score, release year or title. The list shows the value you're sorting by; the details panel shows them all.
 - **Filters** for store, installed only, and hiding unrated games.
+- **Videos:** Steam trailers and YouTube gameplay videos play right in the details pane.
 - **Launch** installed games straight from the list, through Steam, so a game keeps running when you close this app.
 - **Self-contained:** the app runs in its own window and brings its own Python, so it doesn't need a browser or the system Python. Everything, including your cache, lives in this folder.
 
@@ -59,20 +60,22 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 
 | Button | Action |
 | --- | --- |
-| D-pad / left stick | Move |
+| D-pad / left stick ▲ ▼ | Move |
+| D-pad / left stick ◀ ▶ | Previous / next video |
 | A | Launch the selected game, or install it with Heroic if it isn't installed (asks first) |
 | B | Clear search and filters |
 | X | Switch sort mode |
 | View (two squares) | Reverse the sort order |
 | Y | Open the genre picker |
 | LB / RB | Previous / next genre |
-| LT / RT, ◀ / ▶ | Page up / down |
-| Right stick | Scroll the details panel |
-| Menu (three lines) | Store filter, installed only, hide unrated, search, refresh, fix a match, quit |
+| LT / RT | Page up / down |
+| Right stick | Up/down: scroll the details pane · ◀ ▶: previous/next video |
+| Right stick click (R3) | Trailer sound on/off |
+| Menu (three lines) | Trailer sound, store filter, installed only, hide unrated, play style, search, refresh, fix a match, quit |
 
 **Desktop Mode:** Steam's Desktop controller layout turns the buttons into keys, and the app maps them: A = Enter, View = Tab, Y = Space, LB / RB = Ctrl / Alt. But B and Menu both send Escape (the app treats it as Menu), and X opens Steam's on-screen keyboard, which takes focus away from the app. For full controller support, **hold the Menu (three lines) button for a second** to switch Steam to its Gamepad layout, or launch the app through Steam as a Non-Steam Game. On a Deck in Desktop Mode, the app shows a warning bar about this until it sees a real gamepad button. If a button ever does the wrong thing, **Menu → Controller test** shows exactly what the app receives.
 
-To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, and `/` for search. Mouse and touch also work.
+To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, `v` (trailer sound), and `/` for search. Mouse and touch also work.
 
 ## IGDB (optional, with a Twitch key)
 
@@ -81,9 +84,9 @@ With a free **Twitch developer key**, the app also uses **IGDB** to fill the gap
 - **Better matching:** games Steam's search misses are looked up on IGDB, including its alternative names; when IGDB knows the game's Steam page, the game gets its full Steam reviews (on one library this linked 9 more games, e.g. *Trine 4: Definitive Edition* → *Trine 4: The Nightmare Prince*).
 - **Critic score:** the Metascore where Steam has one. Otherwise IGDB's critic score, unless it's based on fewer than 3 reviews or Wikidata's OpenCritic score is based on more reviews, in which case OpenCritic's is used. **Sort → Critic score** uses it, and the source and review count are shown (e.g. "OpenCritic · 33 reviews").
 - **Scores for unrated games:** the same critic score choice, or failing that IGDB's user rating. IGDB scores based on fewer than 3 critic reviews or 5 user ratings aren't used; they still show (with their counts) in the details panel.
-- **How long to beat:** main story length next to the rating, and all three times in the details panel. IGDB has times for roughly 40% of games.
+- **How long to beat:** main story, + extras and 100% times beside the score tiles in the details pane. IGDB has times for roughly 40% of games.
 - **Play style and perspective filters** (Menu): single player, co-op, split screen, multiplayer…; first person, third person, isometric, side view…
-- **In the details panel:** IGDB's scores with review counts, play styles, multiplayer details (e.g. "Local co-op up to 4"), **same series in your library** and **more like this in your library** (tap a name to jump to it).
+- **In the details panel:** IGDB's user or critic score in the score tiles when it's the one in use (with its count), play styles, multiplayer details (e.g. "Local co-op up to 4"), **same series in your library** and **more like this in your library** (tap a name to jump to it).
 - **Games not on Steam** get IGDB's cover, description, release year, developer and genres.
 
 Create an application at [dev.twitch.tv/console](https://dev.twitch.tv/console) (OAuth redirect URL: `http://localhost`, client type: Confidential), then put its client ID and secret in `twitch.json` in the data folder (`~/.local/share/heroic-ratings/` for the AppImage):
@@ -93,6 +96,21 @@ Create an application at [dev.twitch.tv/console](https://dev.twitch.tv/console) 
 ```
 
 or set `HEROIC_RATINGS_TWITCH_CLIENT_ID` and `HEROIC_RATINGS_TWITCH_CLIENT_SECRET`. IGDB data is fetched on the next sync (restart the app, or choose **Menu → Refresh**) and takes seconds; it's refreshed monthly.
+
+## Layout
+
+The list shows each game's title, an Installed / download badge and the value it's sorted by. The details pane on the right shows:
+
+- **The game's trailer, playing right there** (muted and looping) once a game has been selected for a moment, with the title and four score tiles beside it. **The first tile always shows the same value as the list**, for the current sort (e.g. the weighted rating 86 with Sort: Rating, the Steam percentage 88% with Sort: % Positive). Each kind of score appears once, from the source in use, with its review count: the user score is Steam's percentage (or IGDB's user rating for games without Steam reviews), the critic score is the one the app chose (Metascore, IGDB or OpenCritic). Under the tiles, with IGDB: how long to beat (main story, + extras, 100%).
+- Below: the description, where the Steam match came from (only when it was found indirectly or by another name), the game's other videos, play styles and multiplayer details, same series and similar games from your library (tap to jump), and genres. The right stick scrolls the pane.
+
+## Videos
+
+- **R3** (right stick click) or `v`: trailer sound on/off (remembered; also in the menu as *Trailer sound*).
+- **D-pad ◀ ▶** (or right stick ◀ ▶): previous / next video. The thumbnails under the description slide along to keep the playing one centred; tap a thumbnail (or the ‹ › at the edges) to play another, or tap the video to pause it.
+- The trailer pauses while a game or Heroic is in front, or when the app isn't focused.
+
+Sources: **Steam's store videos** (trailers, no key needed) come first, main trailer first; [hls.js](https://github.com/video-dev/hls.js) 1.5.20 is bundled as a fallback player (Apache-2.0, see `web/vendor/hls.js-LICENSE`). **YouTube videos from IGDB** (with a Twitch key) follow: videos IGDB labels as gameplay, and for games not on Steam its trailers too. They play in YouTube's embedded player, so YouTube may show ads and some uploaders don't allow embedding. Videos are only looked up for the game you're looking at, and Steam's list is cached for a month.
 
 ## Launching games
 

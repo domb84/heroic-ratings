@@ -530,7 +530,7 @@ class IGDB:
                      "involved_companies.company.name,multiplayer_modes.campaigncoop,multiplayer_modes.lancoop,"
                      "multiplayer_modes.offlinecoop,multiplayer_modes.offlinecoopmax,multiplayer_modes.offlinemax,"
                      "multiplayer_modes.onlinecoop,multiplayer_modes.onlinecoopmax,multiplayer_modes.onlinemax,"
-                     "multiplayer_modes.splitscreen")
+                     "multiplayer_modes.splitscreen,videos.name,videos.video_id")
 
     def details(self, game_ids: list[int]) -> dict[int, dict]:
         """Everything the app uses about up to 500 games, including time to beat."""
@@ -570,8 +570,19 @@ class IGDB:
                          if c.get("developer") and (c.get("company") or {}).get("name")],
                 "genres": names(r.get("genres")), "themes": names(r.get("themes")), "mp": mp,
                 "main": hrs(t.get("hastily")), "extra": hrs(t.get("normally")), "comp": hrs(t.get("completely")),
+                "videos": _igdb_videos(r.get("videos")),
             }
         return out
+
+    def videos(self, game_id: int) -> list[dict]:
+        rows = self.query("games", f"fields videos.name,videos.video_id; where id = {int(game_id)};")
+        return _igdb_videos(rows[0].get("videos")) if rows else []
+
+
+def _igdb_videos(vs) -> list[dict]:
+    """IGDB's videos are YouTube IDs with a label ("Trailer", "Gameplay video", …)."""
+    return [{"name": v.get("name") or "Video", "id": v["video_id"]} for v in vs or []
+            if isinstance(v, dict) and re.fullmatch(r"[\w-]{6,20}", v.get("video_id") or "")]
 
 
 def twitch_credentials() -> tuple[str, str] | None:
@@ -1023,8 +1034,9 @@ class State:
         }
         out["modes"] = ig.get("modes") or []
         out["persp"] = ig.get("persp") or []
-        if ig.get("main") or ig.get("extra") or ig.get("comp"):
-            out["length"] = {"main": ig.get("main"), "extra": ig.get("extra"), "comp": ig.get("comp"), "src": "igdb"}
+        sane = lambda v: v if v and v < 900 else None   # 999h-style placeholders (also in data saved earlier)
+        if sane(ig.get("main")) or sane(ig.get("extra")) or sane(ig.get("comp")):
+            out["length"] = {"main": sane(ig.get("main")), "extra": sane(ig.get("extra")), "comp": sane(ig.get("comp")), "src": "igdb"}
         # games without Steam data: fill the blanks from IGDB
         if not out.get("desc"):
             out["desc"] = ig.get("summary", "")
@@ -1066,6 +1078,51 @@ class State:
                 out["rating"], out["rating_src"] = float(best["score"]), "critic"
             elif ig and ig.get("user") and (ig.get("user_n") or 0) >= IGDB_MIN_USERS:
                 out["rating"], out["rating_src"] = float(ig["user"]), "igdb-user"
+
+    def videos_for(self, gid: str) -> list[dict]:
+        """Videos to show for one game: Steam's store videos (main trailer first), then
+        IGDB's YouTube "gameplay" videos, then (only if Steam has none) IGDB's other videos."""
+        now = time.time()
+        g = next((x for x in self.games if x["id"] == gid), None)
+        if not g:
+            return []
+        m = self.cache["matches"].get(gid) or {}
+        out = []
+        appid = m.get("appid")
+        if appid:
+            vc = self.cache.setdefault("videos", {})
+            e = vc.get(str(appid))
+            if not e or now - e.get("t", 0) > IGDB_REFRESH_SECS:
+                try:
+                    j = self.steam.get("https://store.steampowered.com/api/appdetails",
+                                       {"appids": appid, "filters": "movies"})
+                    movies = ((j.get(str(appid)) or {}).get("data") or {}).get("movies") or []
+                    e = {"t": now, "movies": [{"name": mv.get("name", "Trailer"), "thumb": mv.get("thumbnail"),
+                                               "hls": mv.get("hls_h264"), "highlight": bool(mv.get("highlight"))}
+                                              for mv in movies if mv.get("hls_h264")]}
+                    vc[str(appid)] = e
+                    self.save()
+                except Exception as ex:
+                    log("Steam videos failed:", appid, repr(ex))
+                    e = e or {"movies": []}
+            for mv in sorted(e.get("movies", []), key=lambda mv: not mv["highlight"]):
+                out.append({"src": "steam", "name": mv["name"], "thumb": mv["thumb"], "url": mv["hls"]})
+        gid_igdb = (self.cache.get("igdb_map", {}).get(gid) or {}).get("id")
+        if gid_igdb and twitch_credentials():
+            det = self.cache.setdefault("igdb", {}).setdefault(str(gid_igdb), {"id": gid_igdb})
+            if "videos" not in det:   # details saved before videos were fetched
+                try:
+                    det["videos"] = IGDB(*twitch_credentials()).videos(gid_igdb)
+                    self.save()
+                except Exception as ex:
+                    log("IGDB videos failed:", gid_igdb, repr(ex))
+            yt = det.get("videos") or []
+            gameplay = [v for v in yt if re.search(r"gameplay|walkthrough|let'?s play", v["name"], re.I)]
+            others = [v for v in yt if v not in gameplay] if not out else []
+            for v in gameplay + others:
+                out.append({"src": "youtube", "name": v["name"], "id": v["id"],
+                            "thumb": f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg"})
+        return out[:10]
 
     def _build_igdb_index(self):
         """Which library games each IGDB ID and series belongs to (for "similar"/"same series")."""
@@ -1939,6 +1996,8 @@ def make_handler(state: State, on_quit):
             if path == "/api/reload-library":   # Heroic just finished an install/uninstall
                 state.maybe_reload_library(force=True)
                 return self._json({"ok": True})
+            if path == "/api/videos":
+                return self._json({"ok": True, "videos": state.videos_for(body.get("id", ""))})
             if path == "/api/downloads":
                 return self._json(heroic_downloads(state.heroic))
             if path in ("/api/launch", "/api/install"):
