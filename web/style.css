@@ -195,14 +195,6 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 #paused .phint { margin-top: 0.9rem; color: var(--mute); font-size: 0.85rem; display: flex; gap: 0.35rem; justify-content: center; align-items: center; }
 
 /* Controller test screen */
-#diag { position: fixed; inset: 0; z-index: 40; background: #000d; display: grid; place-items: center; }
-#diag[hidden] { display: none; }
-#diag .pbox { background: var(--panel); border: 1px solid var(--line); border-radius: 0.8rem; padding: 1.2rem 1.6rem; width: min(52rem, 94vw); text-align: center; }
-#diag .ptitle { font-size: 1.3rem; font-weight: 700; }
-#diag .psub { color: var(--mute); margin-top: 0.2rem; }
-#diagOut { text-align: left; background: var(--bg); border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.8rem 1rem; margin: 0.9rem 0; font-size: 0.85rem; line-height: 1.4; max-height: 60vh; overflow: auto; white-space: pre-wrap; user-select: text; }
-#diagClose { font: inherit; font-weight: 700; padding: 0.6rem 2.2rem; border-radius: 0.6rem; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
-#diag .phint { margin-top: 0.7rem; color: var(--mute); font-size: 0.85rem; }
 
 /* install options + download progress */
 .opt.info { background: transparent; color: var(--mute); }
@@ -286,3 +278,41 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 #detail .vcar .varrow.l { left: 0; justify-content: flex-start; padding-left: .2rem; background: linear-gradient(90deg, var(--panel) 20%, transparent); }
 #detail .vcar .varrow.r { right: 0; justify-content: flex-end; padding-right: .2rem; background: linear-gradient(270deg, var(--panel) 20%, transparent); }
 #detail .vcar.more-l .varrow.l, #detail .vcar.more-r .varrow.r { display: flex; }
+
+/* settings page and text prompt */
+.modal.settings .opt.info { font-size: .82rem; line-height: 1.35; }
+.modal.settings .opt.info span:first-child { white-space: normal; }
+.modal.prompt #promptInput { width: 100%; margin: .6rem 0; padding: .55rem .7rem; font-size: 1.05rem; border-radius: .4rem;
+                             border: 1px solid var(--accent); background: var(--panel2); color: var(--text); }
+.modal.prompt .hint { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+.modal.prompt .hint > span { display: inline-flex; align-items: center; gap: .3rem; }
+
+/* on-screen keyboard */
+.modal.keyboard { width: min(46rem, 94vw); }
+.modal.keyboard .kbfield { background: var(--panel2); border: 1px solid var(--accent); border-radius: .4rem; padding: .55rem .7rem;
+                            font-size: 1.15rem; min-height: 2.6rem; margin: .5rem 0 .7rem; word-break: break-all; }
+.modal.keyboard .caret { display: inline-block; width: 2px; height: 1.2em; background: var(--accent); vertical-align: text-bottom; margin-left: 1px;
+                         animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.modal.keyboard .kb { display: flex; flex-direction: column; gap: .35rem; }
+.modal.keyboard .kbrow { display: flex; gap: .35rem; }
+.modal.keyboard .kkey { flex: 1; text-align: center; padding: .55rem 0; border-radius: .35rem; background: var(--panel2);
+                        border: 1px solid var(--line); font-size: 1.05rem; cursor: pointer; user-select: none; }
+.modal.keyboard .kkey.wide { font-size: .9rem; }
+.modal.keyboard .kkey.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+.modal.keyboard .kkey.on { border-color: var(--accent); }
+.modal.keyboard .hint { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: .7rem; }
+.modal.keyboard .hint > span { display: inline-flex; align-items: center; gap: .3rem; }
+/* keyboard sits at the bottom so the results it filters stay visible above it */
+#overlay:has(.modal.keyboard) { background: #0006; place-items: end center; padding-bottom: .5rem; }
+.modal.keyboard .kbhelp { color: var(--mute); font-size: .85rem; margin-top: .2rem; }
+
+/* battery level in the header */
+.battery { display: flex; align-items: center; gap: .35rem; color: var(--mute); font-size: .9rem; white-space: nowrap; }
+.battery[hidden] { display: none; }
+.battery .bicon { position: relative; width: 1.5rem; height: .75rem; border: 2px solid currentColor; border-radius: .2rem; padding: 1px; }
+.battery .bicon::after { content: ""; position: absolute; right: -5px; top: 50%; width: 3px; height: .35rem; transform: translateY(-50%);
+                         background: currentColor; border-radius: 0 1px 1px 0; }
+.battery .bicon i { display: block; height: 100%; background: currentColor; border-radius: 1px; }
+.battery.low { color: var(--neg); }
+.battery.charging { color: var(--pos); }

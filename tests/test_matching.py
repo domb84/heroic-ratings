@@ -60,12 +60,12 @@ class Library(unittest.TestCase):
             d = Path(d)
             (d / "store_cache").mkdir()
             (d / "legendaryConfig/legendary").mkdir(parents=True)
-            json.dump({"library": [{"app_name": "a1", "title": "Hades", "runner": "legendary",
-                                    "dlcList": [{"app_name": "x", "title": "DLC"}]}]},
-                      open(d / "store_cache/legendary_library.json", "w"))
-            json.dump({"games": [{"app_name": "g1", "title": "Frostpunk", "runner": "gog", "is_installed": True}]},
-                      open(d / "store_cache/gog_library.json", "w"))
-            json.dump({"a1": {}}, open(d / "legendaryConfig/legendary/installed.json", "w"))
+            (d / "store_cache/legendary_library.json").write_text(json.dumps(
+                {"library": [{"app_name": "a1", "title": "Hades", "runner": "legendary",
+                              "dlcList": [{"app_name": "x", "title": "DLC"}]}]}))
+            (d / "store_cache/gog_library.json").write_text(json.dumps(
+                {"games": [{"app_name": "g1", "title": "Frostpunk", "runner": "gog", "is_installed": True}]}))
+            (d / "legendaryConfig/legendary/installed.json").write_text(json.dumps({"a1": {}}))
             games = {g["id"]: g for g in h.load_library(d)}
             self.assertEqual(set(games), {"legendary:a1", "gog:g1"})
             self.assertTrue(games["legendary:a1"]["installed"])

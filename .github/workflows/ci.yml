@@ -1,0 +1,35 @@
+# Runs the tests on every push and pull request.
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]          # release.yml tests tagged versions itself
+  pull_request:
+  workflow_call:                 # used by release.yml before it builds
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"   # the version the AppImage bundles
+
+      - name: Install Playwright (for the interface tests)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install playwright coverage
+          python -m playwright install --with-deps chromium-headless-shell
+
+      - name: Run tests
+        run: python -m coverage run --include=heroic_ratings.py -m unittest discover -v tests
+
+      - name: Coverage
+        run: python -m coverage report | tail -1 >> "$GITHUB_STEP_SUMMARY"

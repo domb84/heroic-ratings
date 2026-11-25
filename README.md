@@ -60,22 +60,22 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 
 | Button | Action |
 | --- | --- |
-| D-pad / left stick ▲ ▼ | Move |
+| D-pad / left stick ▲ ▼ | Move (a fresh press at the top or bottom wraps round to the other end) |
 | D-pad / left stick ◀ ▶ | Previous / next video |
 | A | Launch the selected game, or install it with Heroic if it isn't installed (asks first) |
-| B | Clear search and filters |
+| B | Open the genre picker |
 | X | Switch sort mode |
 | View (two squares) | Reverse the sort order |
-| Y | Open the genre picker |
+| Y | Search (on a Steam Deck with the app's on-screen keyboard) |
 | LB / RB | Previous / next genre |
-| LT / RT | Page up / down |
+| LT / RT | Page up / down; **hold** for half a second to jump to the top / bottom |
 | Right stick | Up/down: scroll the details pane · ◀ ▶: previous/next video |
 | Right stick click (R3) | Trailer sound on/off |
-| Menu (three lines) | Trailer sound, store filter, installed only, hide unrated, play style, search, refresh, fix a match, quit |
+| Menu (three lines) | Store filter, installed only, hide unrated, play style, perspective, Steam match, match unmatched games, settings, uninstall, refresh, quit |
 
-**Desktop Mode:** Steam's Desktop controller layout turns the buttons into keys, and the app maps them: A = Enter, View = Tab, Y = Space, LB / RB = Ctrl / Alt. But B and Menu both send Escape (the app treats it as Menu), and X opens Steam's on-screen keyboard, which takes focus away from the app. For full controller support, **hold the Menu (three lines) button for a second** to switch Steam to its Gamepad layout, or launch the app through Steam as a Non-Steam Game. On a Deck in Desktop Mode, the app shows a warning bar about this until it sees a real gamepad button. If a button ever does the wrong thing, **Menu → Controller test** shows exactly what the app receives.
+**Desktop Mode:** Steam's Desktop controller layout turns the buttons into keys, and the app maps them: A = Enter, View = Tab, Y = Space, LB / RB = Ctrl / Alt. But B and Menu both send Escape (the app treats it as Menu), and X opens Steam's on-screen keyboard, which takes focus away from the app. For full controller support, **hold the Menu (three lines) button for a second** to switch Steam to its Gamepad layout, or launch the app through Steam as a Non-Steam Game. On a Deck in Desktop Mode, the app shows a warning bar about this until it sees a real gamepad button. 
 
-To search, choose Menu → Search, then press **Steam + X** for the on-screen keyboard. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y`, `[` `]`, `v` (trailer sound), and `/` for search. Mouse and touch also work.
+To search, press **Y** (or Menu → Search…). On a Steam Deck this opens the app's own on-screen keyboard, because Steam's keyboard (Steam + X) is unreliable for non-Steam apps: D-pad to move, **A** types, **X** deletes, **Y** adds a space, **LB** toggles capitals, **Menu** finishes, **B** cancels. The results update as you type. The settings fields use the same keyboard; a physical keyboard also types into it. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y` (search), `g` or Backspace (genres), `[` `]`, `v` (trailer sound), and `/` for search. Mouse and touch also work.
 
 ## IGDB (optional, with a Twitch key)
 
@@ -89,7 +89,7 @@ With a free **Twitch developer key**, the app also uses **IGDB** to fill the gap
 - **In the details panel:** IGDB's user or critic score in the score tiles when it's the one in use (with its count), play styles, multiplayer details (e.g. "Local co-op up to 4"), **same series in your library** and **more like this in your library** (tap a name to jump to it).
 - **Games not on Steam** get IGDB's cover, description, release year, developer and genres.
 
-Create an application at [dev.twitch.tv/console](https://dev.twitch.tv/console) (OAuth redirect URL: `http://localhost`, client type: Confidential), then put its client ID and secret in `twitch.json` in the data folder (`~/.local/share/heroic-ratings/` for the AppImage):
+Create an application at [dev.twitch.tv/console](https://dev.twitch.tv/console) (OAuth redirect URL: `http://localhost`, client type: Confidential), then enter its client ID and secret in **Menu → Settings…** (on a Steam Deck the app's on-screen keyboard opens). The app checks them with Twitch before saving them, readable only by you, in `twitch.json` in the data folder (`~/.local/share/heroic-ratings/` for the AppImage). You can also create that file yourself:
 
 ```json
 { "client_id": "…", "client_secret": "…" }
@@ -99,14 +99,14 @@ or set `HEROIC_RATINGS_TWITCH_CLIENT_ID` and `HEROIC_RATINGS_TWITCH_CLIENT_SECRE
 
 ## Layout
 
-The list shows each game's title, an Installed / download badge and the value it's sorted by. The details pane on the right shows:
+The header shows the number of games and, on a Steam Deck (or any machine with a battery), the battery level: ⚡ while charging, red at 20% or below. The list shows each game's title, an Installed / download badge and the value it's sorted by. The details pane on the right shows:
 
 - **The game's trailer, playing right there** (muted and looping) once a game has been selected for a moment, with the title and four score tiles beside it. **The first tile always shows the same value as the list**, for the current sort (e.g. the weighted rating 86 with Sort: Rating, the Steam percentage 88% with Sort: % Positive). Each kind of score appears once, from the source in use, with its review count: the user score is Steam's percentage (or IGDB's user rating for games without Steam reviews), the critic score is the one the app chose (Metascore, IGDB or OpenCritic). Under the tiles, with IGDB: how long to beat (main story, + extras, 100%).
 - Below: the description, where the Steam match came from (only when it was found indirectly or by another name), the game's other videos, play styles and multiplayer details, same series and similar games from your library (tap to jump), and genres. The right stick scrolls the pane.
 
 ## Videos
 
-- **R3** (right stick click) or `v`: trailer sound on/off (remembered; also in the menu as *Trailer sound*).
+- **R3** (right stick click) or `v`: trailer sound on/off (remembered).
 - **D-pad ◀ ▶** (or right stick ◀ ▶): previous / next video. The thumbnails under the description slide along to keep the playing one centred; tap a thumbnail (or the ‹ › at the edges) to play another, or tap the video to pause it.
 - The trailer pauses while a game or Heroic is in front, or when the app isn't focused.
 
@@ -154,12 +154,13 @@ Earlier versions of this app added a hidden **Heroic (Debug)** Steam shortcut. T
 
 ## Wrong or missing matches
 
-The details panel shows which Steam game each title was matched to, and notes when the match was found through Wikidata. Games that aren't sold on Steam get a critic score when Wikidata has one; that score is used for sorting by Rating. Games with no data show as "Not on Steam". Editors, betas, soundtracks and similar library entries show as "Extra / tool" and aren't looked up. Both groups are always sorted to the bottom.
+The details pane notes when a game was matched to a Steam page with a different name, or found through Wikidata or IGDB. Games that aren't sold on Steam get a critic score when Wikidata has one; that score is used for sorting by Rating. Games with no data show as "Not on Steam". Editors, betas, soundtracks and similar library entries show as "Extra / tool" and aren't looked up. Both groups are always sorted to the bottom.
 
 Wikidata limits how fast it can be queried, so the first sync takes a little longer: about 2–3 seconds per game Steam couldn't find.
 
-- **Remove a bad match:** Menu → *Wrong Steam match for "…"*.
-- **Set the right match:** edit `data/overrides.json`. The key is the game's ID (`runner:app_name`) and the value is the Steam app ID, or `null` for no match. Then choose Menu → *Refresh*.
+- **Fix or add a match:** select the game, then **Menu → Steam match for "…"**. Search by name (pre-filled with the title) and pick the right Steam page. Results come from Steam's store search and, with an IGDB key, from IGDB, which also finds games no longer sold on Steam (e.g. *POSTAL: Classic and Uncut* → *Postal*, app 232770); the closest names come first. For a title too generic to search for, type the **Steam app ID**, the number in the game's Steam store address (e.g. `269270` for *LOVE*). *Not on Steam* removes a match. The game's reviews are fetched straight away.
+- **Re-try every unmatched game now:** **Menu → Match unmatched games (N)** looks up all games without a Steam page again (Steam search, Wikidata and, with a key, IGDB) instead of waiting for the monthly retry. Editors and matches you set yourself are left alone.
+- **By hand:** the choices are stored in `overrides.json` in the data folder. The key is the game's ID (`runner:app_name`) and the value is the Steam app ID, or `null` for no match. After editing it, choose Menu → *Refresh*.
 
   ```json
   { "legendary:Fortnite": null, "gog:1207658924": 22330 }
@@ -181,8 +182,41 @@ python3 heroic_ratings.py [--port 8787] [--heroic-dir PATH] [--kiosk] [--no-sync
 
 The app finds the Heroic folder automatically for both the Flatpak install (`~/.var/app/com.heroicgameslauncher.hgl/config/heroic`) and the native one (`~/.config/heroic`).
 
+## Logs
+
+The app writes three logs to `logs/` in its data folder (`~/.local/share/heroic-ratings/logs/` for the AppImage, `data/logs/` otherwise):
+
+| File | What's in it |
+| --- | --- |
+| `app.log` | Start-up details, sync steps, every action (launch, install, uninstall, settings), Heroic/Steam/IGDB problems, errors from the interface, and full tracebacks for anything that crashes. Rotated at 1 MB, three old files kept. |
+| `electron.log` | The app window: start-up, a window that stops responding, and any of its processes that crash or are killed (e.g. for running out of memory). |
+| `health.log` | One line of JSON every 30 seconds (every 5 seconds while Heroic is downloading or uninstalling): free memory, swap used, unwritten disk data, the kernel's memory/disk/CPU pressure and the biggest processes. Each line is saved straight to disk, so after a freeze and a hard reset the last lines show what was happening. |
+
+## Releases (GitHub Actions)
+
+Two workflows live in `.github/workflows/`:
+
+- **Tests** (`ci.yml`) runs on every push and pull request: all unit tests plus the interface tests in headless Chromium, with a coverage summary.
+- **Release** (`release.yml`) runs when a version tag is pushed. It runs the tests, builds the AppImage (the build scripts download Electron, Python and appimagetool and verify their checksums; downloads are cached between runs), checks that the AppImage unpacks and its backend imports, and publishes a GitHub release with `HeroicRatings-<tag>-x86_64.AppImage`, its `.sha256` file and release notes generated from the commits.
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+It can also be started by hand from the repository's **Actions** tab (*Release → Run workflow*, with a tag name); that makes a **draft** release, to check before publishing.
+
 ## Tests
 
 ```bash
 python3 -m unittest discover tests
+```
+
+This runs the matching, client, sync, API and logging tests against a throwaway fixture library (no network, nothing outside a temp folder is touched). The interface tests in `tests/test_ui.py` drive the real page in headless Chromium and are skipped unless [Playwright](https://playwright.dev/python/) is installed:
+
+```bash
+python3 -m venv data/.test/venv && data/.test/venv/bin/pip install playwright coverage
+PLAYWRIGHT_BROWSERS_PATH=data/.test/pw data/.test/venv/bin/playwright install chromium-headless-shell
+PLAYWRIGHT_BROWSERS_PATH=data/.test/pw data/.test/venv/bin/python -m unittest discover tests
+data/.test/venv/bin/python -m coverage run --include=heroic_ratings.py -m unittest discover tests && data/.test/venv/bin/python -m coverage report
 ```

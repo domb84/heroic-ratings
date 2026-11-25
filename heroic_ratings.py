@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import logging.handlers
 import math
 import os
 import re
@@ -96,8 +98,45 @@ UA = "heroic-ratings/1.0 (local library tool)"
 
 # --------------------------------------------------------------------------- utils
 
-def log(*a):
-    print("[heroic-ratings]", *a, file=sys.stderr, flush=True)
+# ------------------------------------------------------------------- logging
+#
+# Everything goes to stderr as before and, once setup_logging() has run, to
+# <data>/logs/app.log (rotated: 1 MB x 4). health.log is written by HealthMonitor.
+
+LOG_DIR = DATA_DIR / "logs"
+logger = logging.getLogger("heroic-ratings")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+_stderr = logging.StreamHandler(sys.stderr)
+_stderr.setFormatter(logging.Formatter("[heroic-ratings] %(message)s"))
+logger.addHandler(_stderr)
+
+
+def setup_logging(log_dir: Path | None = None, max_bytes: int = 1_000_000, backups: int = 3) -> Path | None:
+    """Add the rotating app.log file handler. Returns the log file, or None if it can't be written."""
+    log_dir = log_dir or LOG_DIR
+    for h in [h for h in logger.handlers if isinstance(h, logging.FileHandler)]:
+        logger.removeHandler(h)
+        h.close()
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(log_dir / "app.log", maxBytes=max_bytes,
+                                                  backupCount=backups, encoding="utf-8")
+    except OSError as e:
+        log("can't write logs to", log_dir, e)
+        return None
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(threadName)s: %(message)s"))
+    logger.addHandler(fh)
+    return log_dir / "app.log"
+
+
+def log(*a, level: int = logging.INFO):
+    logger.log(level, " ".join(str(x) for x in a))
+
+
+def log_error(*a, exc: BaseException | None = None):
+    """An error, with the traceback of exc (or of the exception being handled)."""
+    logger.error(" ".join(str(x) for x in a), exc_info=exc if exc is not None else True)
 
 
 def read_json(path: Path, default=None):
@@ -341,6 +380,7 @@ class Steam:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     return json.loads(r.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
+                e.close()   # release the error response before retrying
                 if e.code in (429, 500, 502, 503, 504):
                     delay = min(90, 5 * 2 ** attempt)
                     ra = (e.headers or {}).get("Retry-After", "")
@@ -585,6 +625,54 @@ def _igdb_videos(vs) -> list[dict]:
             if isinstance(v, dict) and re.fullmatch(r"[\w-]{6,20}", v.get("video_id") or "")]
 
 
+TWITCH_ID_RE = re.compile(r"[A-Za-z0-9]{10,64}")
+
+
+def twitch_settings() -> dict:
+    """What the settings page may show about the Twitch/IGDB credentials (never the secret)."""
+    if os.environ.get("HEROIC_RATINGS_TWITCH_CLIENT_ID") and os.environ.get("HEROIC_RATINGS_TWITCH_CLIENT_SECRET"):
+        source = "env"
+    elif (DATA_DIR / "twitch.json").exists():
+        source = "file"
+    else:
+        source = None
+    creds = twitch_credentials()
+    return {"set": bool(creds), "source": source,
+            "client_id_hint": (creds[0][:4] + "…" + creds[0][-3:]) if creds else ""}
+
+
+def save_twitch_credentials(client_id: str, client_secret: str, check=True) -> dict:
+    """Check the credentials with Twitch, then store them in <data>/twitch.json (readable only by you)."""
+    client_id, client_secret = (client_id or "").strip(), (client_secret or "").strip()
+    if not TWITCH_ID_RE.fullmatch(client_id) or not TWITCH_ID_RE.fullmatch(client_secret):
+        return {"ok": False, "error": "That doesn't look like a Twitch client ID and secret (letters and digits only)."}
+    if check:
+        try:
+            IGDB(client_id, client_secret)._get_token()
+        except urllib.error.HTTPError as e:
+            e.close()
+            return {"ok": False, "error": f"Twitch didn't accept these credentials (HTTP {e.code}). Check the client ID and secret."}
+        except (OSError, ValueError, KeyError) as e:
+            return {"ok": False, "error": f"Couldn't reach Twitch to check them ({type(e).__name__}). Try again when online."}
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    f = DATA_DIR / "twitch.json"
+    tmp = f.with_name("twitch.json.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as out:
+        json.dump({"client_id": client_id, "client_secret": client_secret}, out)
+    os.replace(tmp, f)
+    log("Twitch/IGDB credentials saved")
+    return {"ok": True, **twitch_settings()}
+
+
+def remove_twitch_credentials() -> dict:
+    if twitch_settings()["source"] == "env":
+        return {"ok": False, "error": "These come from environment variables; remove them there."}
+    (DATA_DIR / "twitch.json").unlink(missing_ok=True)
+    log("Twitch/IGDB credentials removed")
+    return {"ok": True, **twitch_settings()}
+
+
 def twitch_credentials() -> tuple[str, str] | None:
     """Twitch developer app credentials for IGDB, from the environment or data/twitch.json."""
     cid, secret = os.environ.get("HEROIC_RATINGS_TWITCH_CLIENT_ID"), os.environ.get("HEROIC_RATINGS_TWITCH_CLIENT_SECRET")
@@ -710,6 +798,10 @@ class State:
         self.wake = threading.Event()
         self.force = False
         self.version = 0  # bumps when data changes so the UI can refresh
+        self.busy_until = 0.0  # Heroic downloading/uninstalling: the health log samples more often
+
+    def mark_busy(self, secs: float = 120):
+        self.busy_until = max(self.busy_until, time.time() + secs)
 
     # -- persistence
     def save(self):
@@ -979,7 +1071,7 @@ class State:
             try:
                 self.sync()
             except Exception as e:  # never let the thread die
-                log("sync crashed:", repr(e))
+                log_error("sync crashed:", repr(e), exc=e)
                 self.set_progress("error", message=str(e))
             self.wake.wait()
             self.wake.clear()
@@ -1078,6 +1170,71 @@ class State:
                 out["rating"], out["rating_src"] = float(best["score"]), "critic"
             elif ig and ig.get("user") and (ig.get("user_n") or 0) >= IGDB_MIN_USERS:
                 out["rating"], out["rating_src"] = float(ig["user"]), "igdb-user"
+
+    def rematch_unmatched(self) -> int:
+        """Look for every game without a Steam page again now (Steam search, Wikidata, IGDB),
+        instead of waiting for the monthly retry. Editors and hand-set matches are left alone."""
+        ov = self.overrides()
+        n = 0
+        with self.lock:
+            matches, imap = self.cache["matches"], self.cache.get("igdb_map", {})
+            for g in self.games:
+                m = matches.get(g["id"])
+                if g["id"] in ov or EXTRA_RE.search(g["title"]) or (m and m.get("appid")):
+                    continue
+                if m:
+                    m["t"] = 0
+                    m["wd_t"] = 0
+                imap.pop(g["id"], None)
+                n += 1
+            self.version += 1
+        if n:
+            log("re-matching", n, "unmatched games")
+            self.wake.set()
+        return n
+
+    def match_candidates(self, query: str, title: str = "") -> list[dict]:
+        """Steam pages a user can pick for a game: Steam's store search, IGDB's games that list
+        a Steam page (finds delisted games and other names), or a typed Steam app ID.
+        Name results are ranked by how well they match the game's title and the search."""
+        query = query.strip()
+        out, seen = [], set()
+
+        def add(appid, name, src, year=None):
+            if appid and appid not in seen:
+                seen.add(appid)
+                out.append({"appid": int(appid), "name": name, "src": src, "year": year})
+        if query.isdigit():                       # a Steam app ID
+            try:
+                for it in self.steam.items([int(query)]):
+                    if it.get("success") == 1 or it.get("name"):
+                        rel = (it.get("release") or {}).get("steam_release_date")
+                        add(int(query), it.get("name") or f"app {query}", "Steam app ID", time.gmtime(int(rel)).tm_year if rel else None)
+            except Exception as e:
+                log("app ID lookup failed:", query, repr(e))
+            return out
+        if not query:
+            return out
+        try:
+            for it in self.steam.search(query)[:8]:
+                add(it.get("id"), it.get("name", ""), "Steam")
+        except Exception as e:
+            log("Steam search failed:", repr(e))
+        creds = twitch_credentials()
+        if creds:
+            try:
+                igdb = IGDB(*creds)
+                safe = query.replace('"', " ")
+                rows = igdb.query("games", f'search "{safe}"; fields id,name,first_release_date; limit 15;')
+                steam = igdb.igdb_to_steam([r["id"] for r in rows])
+                for r in rows:
+                    rel = r.get("first_release_date")
+                    add(steam.get(r["id"]), r.get("name", ""), "IGDB", time.gmtime(rel).tm_year if rel else None)
+            except Exception as e:
+                log("IGDB search failed:", repr(e))
+        wanted = [q for q in [title, query, *search_queries(title or query)] if q]
+        out.sort(key=lambda x: -max(similarity(w, x["name"]) for w in wanted))   # stable: ties keep source order
+        return out[:15]
 
     def videos_for(self, gid: str) -> list[dict]:
         """Videos to show for one game: Steam's store videos (main trailer first), then
@@ -1305,7 +1462,7 @@ STEAM_PID_FILE = Path(os.environ.get("HEROIC_RATINGS_STEAM_PID", HOME / ".steam/
 def _process_start(pid: int) -> float | None:
     """Start time of a process (epoch seconds) from /proc, or None."""
     try:
-        btime = next(float(l.split()[1]) for l in open("/proc/stat") if l.startswith("btime"))
+        btime = next(float(l.split()[1]) for l in Path("/proc/stat").read_text().splitlines() if l.startswith("btime"))
         stat = Path(f"/proc/{pid}/stat").read_text()
         return btime + int(stat.rsplit(")", 1)[1].split()[19]) / os.sysconf("SC_CLK_TCK")
     except (OSError, StopIteration, ValueError, IndexError):
@@ -1912,10 +2069,150 @@ def heroic_downloads(heroic_dir: Path | None) -> dict:
     return {"running": True, **(d if isinstance(d, dict) else {})}
 
 
+# ------------------------------------------------------------------- system health log
+#
+# To find out what's happening when the whole Deck freezes (e.g. during big installs):
+# memory, swap, unwritten disk data, the kernel's pressure figures and the biggest
+# processes, every 30 s, or every 5 s while Heroic is downloading / uninstalling.
+# Each line is fsync'ed so it survives a hard reset.
+
+def battery(root: Path = Path("/sys/class/power_supply")) -> dict | None:
+    """{"percent": 0-100, "charging": bool} for the first battery, or None (no battery)."""
+    try:
+        supplies = sorted(root.iterdir())
+    except OSError:
+        return None
+    for d in supplies:
+        try:
+            if (d / "type").read_text().strip() != "Battery":
+                continue
+            pct = int((d / "capacity").read_text().strip())
+            status = (d / "status").read_text().strip() if (d / "status").exists() else ""
+        except (OSError, ValueError):
+            continue
+        return {"percent": max(0, min(100, pct)), "charging": status in ("Charging", "Full"), "status": status}
+    return None
+
+
+def parse_meminfo(text: str) -> dict[str, int]:
+    """/proc/meminfo -> {field: kB}."""
+    out = {}
+    for line in text.splitlines():
+        k, _, v = line.partition(":")
+        parts = v.split()
+        if parts and parts[0].isdigit():
+            out[k.strip()] = int(parts[0])
+    return out
+
+
+def parse_psi(text: str) -> dict[str, float]:
+    """/proc/pressure/<x> -> {"some": avg10, "full": avg10} (percent of time stalled, last 10 s)."""
+    out = {}
+    for line in text.splitlines():
+        kind, *fields = line.split()
+        for f in fields:
+            if f.startswith("avg10="):
+                out[kind] = float(f[6:])
+    return out
+
+
+def top_processes(n: int = 6, proc: Path = Path("/proc")) -> list[list]:
+    """[[rss MB, name, pid]] of the n processes using the most memory."""
+    rows = []
+    for d in proc.iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            text = (d / "status").read_text()
+        except OSError:
+            continue
+        st = parse_meminfo(text)
+        name = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("Name:")), "?")
+        if st.get("VmRSS"):
+            rows.append([round(st["VmRSS"] / 1024), name, int(d.name)])
+    return sorted(rows, reverse=True)[:n]
+
+
+def health_sample() -> dict:
+    def rd(path):
+        try:
+            return Path(path).read_text()
+        except OSError:
+            return ""
+    m = parse_meminfo(rd("/proc/meminfo"))
+    mb = lambda k: round(m.get(k, 0) / 1024)
+    out = {"t": time.strftime("%Y-%m-%dT%H:%M:%S"),
+           "mem_avail_mb": mb("MemAvailable"), "mem_total_mb": mb("MemTotal"),
+           "swap_used_mb": mb("SwapTotal") - mb("SwapFree"), "dirty_mb": mb("Dirty"), "writeback_mb": mb("Writeback")}
+    for kind in ("memory", "io", "cpu"):
+        out[f"psi_{kind}"] = parse_psi(rd(f"/proc/pressure/{kind}"))
+    try:
+        out["load1"] = float(rd("/proc/loadavg").split()[0])
+    except (IndexError, ValueError):
+        pass
+    try:
+        out["top"] = top_processes()
+    except OSError:
+        pass
+    return out
+
+
+class HealthMonitor:
+    def __init__(self, path: Path, busy=lambda: False, idle_secs: float = 30, busy_secs: float = 5,
+                 max_bytes: int = 2_000_000):
+        self.path, self.busy, self.idle_secs, self.busy_secs, self.max_bytes = path, busy, idle_secs, busy_secs, max_bytes
+        self.stop = threading.Event()
+
+    def write(self, sample: dict):
+        """Append one JSON line and fsync it (a hard reset must not lose it); keep one old file."""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists() and self.path.stat().st_size > self.max_bytes:
+                os.replace(self.path, self.path.with_name(self.path.name + ".1"))
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(sample, separators=(",", ":")) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError:
+            pass
+
+    def run(self):
+        while not self.stop.is_set():
+            busy = self.busy()
+            sample = health_sample()
+            sample["busy"] = busy
+            self.write(sample)
+            self.stop.wait(self.busy_secs if busy else self.idle_secs)
+
+    def start(self):
+        threading.Thread(target=self.run, name="health", daemon=True).start()
+        return self
+
+
 # ------------------------------------------------------------------- HTTP server
 
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
+
+
+QUIET_PATHS = {"/api/downloads", "/api/log", "/api/game-shortcut", "/api/videos"}
+
+
+class Budget:
+    """At most `n` events per `per` seconds (so a looping UI error can't flood the log)."""
+    def __init__(self, n: int, per: float):
+        self.n, self.per, self.times = n, per, []
+
+    def take(self) -> bool:
+        now = time.monotonic()
+        self.times = [t for t in self.times if now - t < self.per]
+        if len(self.times) >= self.n:
+            return False
+        self.times.append(now)
+        return True
+
+
+ui_log_budget = Budget(30, 60)
 
 
 def make_handler(state: State, on_quit):
@@ -1935,6 +2232,20 @@ def make_handler(state: State, on_quit):
             self._send(code, json.dumps(obj).encode())
 
         def do_GET(self):
+            try:
+                self._get()
+            except Exception as e:
+                log_error("GET", self.path, "crashed:", repr(e), exc=e)
+                self._json({"error": "internal error"}, 500)
+
+        def do_POST(self):
+            try:
+                self._post()
+            except Exception as e:
+                log_error("POST", self.path, "crashed:", repr(e), exc=e)
+                self._json({"error": "internal error"}, 500)
+
+        def _get(self):
             path = urllib.parse.urlparse(self.path).path
             if path == "/api/games":
                 return self._json(state.snapshot())
@@ -1942,20 +2253,32 @@ def make_handler(state: State, on_quit):
                 state.maybe_reload_library()
                 with state.lock:
                     return self._json({"app": "heroic-ratings", "version": state.version,
-                                       "progress": state.progress})
+                                       "progress": state.progress, "battery": battery()})
             rel = "index.html" if path in ("/", "") else path.lstrip("/")
             f = (WEB_DIR / rel).resolve()
             if WEB_DIR.resolve() not in f.parents or not f.is_file():
                 return self._send(404, b"not found", "text/plain")
             self._send(200, f.read_bytes(), CONTENT_TYPES.get(f.suffix, "application/octet-stream"))
 
-        def do_POST(self):
+        def _post(self):
             path = urllib.parse.urlparse(self.path).path
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 return self._json({"error": "bad json"}, 400)
+            if not isinstance(body, dict):
+                return self._json({"error": "bad json"}, 400)
+            if path not in QUIET_PATHS:   # actions, not the UI's polling
+                log("POST", path, json.dumps({k: v for k, v in body.items() if k in ("id", "force", "add", "fix", "options",
+                                                                                      "removePrefix", "removeSettings", "platform")})[:300])
+            if path == "/api/log":   # errors from the UI
+                if ui_log_budget.take():
+                    lvl = logging.ERROR if body.get("level") == "error" else logging.WARNING
+                    log("UI:", str(body.get("message", ""))[:500], ("\n" + str(body.get("stack", ""))[:2000]) if body.get("stack") else "", level=lvl)
+                return self._json({"ok": True})
+            if path in ("/api/install-options", "/api/install-start", "/api/uninstall-options", "/api/uninstall-start"):
+                state.mark_busy()
             if path == "/api/steam-setup":    # once at start-up
                 try:
                     removed = remove_old_debug_shortcut()
@@ -1996,10 +2319,29 @@ def make_handler(state: State, on_quit):
             if path == "/api/reload-library":   # Heroic just finished an install/uninstall
                 state.maybe_reload_library(force=True)
                 return self._json({"ok": True})
+            if path == "/api/settings":
+                return self._json({"ok": True, "twitch": twitch_settings()})
+            if path == "/api/settings/twitch":
+                r = remove_twitch_credentials() if body.get("remove") else \
+                    save_twitch_credentials(str(body.get("client_id", "")), str(body.get("client_secret", "")))
+                if r["ok"]:
+                    with state.lock:
+                        state.version += 1
+                    state.wake.set()   # sync now: fetch (or stop showing) IGDB data
+                return self._json(r)
+            if path == "/api/rematch-unmatched":
+                return self._json({"ok": True, "count": state.rematch_unmatched()})
+            if path == "/api/match-search":
+                g = next((g for g in state.games if g["id"] == body.get("id")), None)
+                return self._json({"ok": True, "results": state.match_candidates(str(body.get("query", ""))[:100],
+                                                                                  g["title"] if g else "")})
             if path == "/api/videos":
                 return self._json({"ok": True, "videos": state.videos_for(body.get("id", ""))})
             if path == "/api/downloads":
-                return self._json(heroic_downloads(state.heroic))
+                d = heroic_downloads(state.heroic)
+                if d.get("queue") or d.get("uninstalling"):
+                    state.mark_busy()
+                return self._json(d)
             if path in ("/api/launch", "/api/install"):
                 gid = body.get("id", "")
                 g = next((g for g in state.games if g["id"] == gid), None)
@@ -2124,7 +2466,12 @@ def main():
         if not args.kiosk:
             return
     else:
+        logfile = setup_logging()
+        log(f"starting (data {DATA_DIR}, log {logfile}, Steam Deck {STEAM_DECK}, "
+            f"Game Mode {os.environ.get('XDG_CURRENT_DESKTOP', '').lower() == 'gamescope'}, "
+            f"via Steam {bool(os.environ.get('SteamGameId'))}, IGDB key {bool(twitch_credentials())})")
         state = State(args.heroic_dir)
+        HealthMonitor(LOG_DIR / "health.log", busy=lambda: time.time() < state.busy_until).start()
         if args.no_sync:
             state.reload_library()
             state.set_progress("done")

@@ -192,7 +192,7 @@ function renderAll() {
   if (!S.view.length) {
     const msg = !S.games.length
       ? (S.progress.phase === "error" ? esc(S.progress.message) : "Loading your Heroic library…")
-      : "No games match these filters.<br>Press <span class='btn b'>B</span> to clear.";
+      : "No games match these filters.<br>Change them in the menu, or pick another genre with <span class='btn b'>B</span>.";
     els.list.innerHTML = `<div class="empty">${msg}</div>`;
     els.detail.innerHTML = "";
     return;
@@ -358,8 +358,9 @@ function select(i, force) {
     row.classList.add("sel");
     row.scrollIntoView({ block: "nearest" });
   }
+  const same = inline?.gid === S.view[i].id;
   renderDetail(S.view[i]);
-  queueVideos(S.view[i]);   // after renderDetail, which clears the old trailer
+  if (!same) queueVideos(S.view[i]);   // after renderDetail, which clears the old trailer
 }
 
 // The details pane: the trailer (top left) with the title and four stat tiles beside it
@@ -433,11 +434,14 @@ function lengthsHTML(g) {
     <div><b>${fmtHours(L.comp)}</b><small>100%</small></div></div>`;
 }
 function renderDetail(g) {
-  stopInline();
+  // Same game already showing with its trailer playing (e.g. the list reloaded during a
+  // sync): update everything but the video, so it doesn't restart.
+  const keep = inline?.gid === g.id && document.getElementById("vbox")?.dataset.id === g.id;
+  if (!keep) stopInline();
   const tiles = detailTiles(g);
   const showSteamName = g.steam_name && norm(g.steam_name) !== norm(g.title);
   const status = downloadText(g, true) ? `<span class="dl">${esc(downloadText(g, true))}</span>` : g.installed ? '<span class="inst">● Installed</span>' : "Not installed";
-  els.detail.innerHTML = `
+  const html = `
     <div class="top">
       <div id="vbox" data-id="${esc(g.id)}">
         ${g.art ? `<img class="poster" src="${esc(img(g.art, 480))}" alt="">` : ""}
@@ -456,6 +460,19 @@ function renderDetail(g) {
     <div id="vstrip" data-id="${esc(g.id)}"></div>
     ${igdbDetailHTML(g)}
     ${g.genres.length ? `<div class="tags">${g.genres.map(t => `<span class="tag g">${esc(t)}</span>`).join("")}</div>` : ""}`;
+  if (keep) {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    els.detail.querySelector(".top .info").replaceWith(tmp.querySelector(".top .info"));
+    const top = els.detail.querySelector(".top");
+    while (top.nextSibling) top.nextSibling.remove();
+    const rest = document.createDocumentFragment();
+    for (let n = tmp.querySelector(".top").nextSibling; n; ) { const next = n.nextSibling; rest.appendChild(n); n = next; }
+    els.detail.appendChild(rest);
+    renderVideoStrip(g);
+    return;
+  }
+  els.detail.innerHTML = html;
   els.detail.scrollTop = 0;
   if (S.videos[g.id]) renderVideoStrip(g);
 }
@@ -540,6 +557,7 @@ async function poll() {
     const st = await api("/api/status");
     const busy = st.progress.phase in PHASE_TEXT;
     showProgress(st.progress);
+    showBattery(st.battery);
     // While syncing, refresh the list every ~6 s so ratings appear as they arrive.
     if (st.version !== S.version && (!busy || Date.now() - lastFull > 6000)) {
       lastFull = Date.now();
@@ -549,6 +567,18 @@ async function poll() {
   } catch (e) {
     setTimeout(poll, 5000);
   }
+}
+
+// Battery level in the header (from the Deck's battery; hidden on machines without one).
+function showBattery(b) {
+  const el = $("battery");
+  el.hidden = !b;
+  if (!b) return;
+  $("batteryText").textContent = `${b.charging ? "⚡" : ""}${b.percent}%`;
+  $("batteryFill").style.width = `${b.percent}%`;
+  el.classList.toggle("low", b.percent <= 20 && !b.charging);
+  el.classList.toggle("charging", b.charging);
+  el.title = b.status || "";
 }
 
 // ---------------------------------------------------------------- toast
@@ -575,6 +605,16 @@ function closeModal() {
 function renderModal() {
   const m = S.modal;
   els.modal.className = "modal " + (m.kind || "");
+  if (m.kind === "keyboard") { els.modal.innerHTML = kbHTML(m); return; }
+  if (m.kind === "prompt") {   // one text field (PC: type with the keyboard)
+    els.modal.innerHTML = `<h3>${esc(m.title)}</h3>
+      <div class="q">${m.html || ""}</div>
+      <input id="promptInput" type="${m.secret ? "password" : "text"}" autocomplete="off" spellcheck="false" value="${esc(m.value || "")}">
+      <div class="hint"><span>Enter OK</span><span>Esc Cancel</span></div>`;
+    const inp = document.getElementById("promptInput");
+    setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    return;
+  }
 
   if (m.kind === "confirm") {
     els.modal.innerHTML = `<div class="q">${m.html}</div>
@@ -591,6 +631,12 @@ function renderModal() {
 
 function modalInput(a) {
   const m = S.modal;
+  if (m.kind === "keyboard") return kbInput(m, a);
+  if (m.kind === "prompt") {
+    if (a === "a") { const v = document.getElementById("promptInput").value; closeModal(); m.onSave(v); }
+    else if (a === "b" || a === "start") { closeModal(); m.onCancel?.(); }
+    return;
+  }
 
   if (m.kind === "confirm") {
     if (a === "a") { closeModal(); m.onYes(); }
@@ -606,6 +652,8 @@ function modalInput(a) {
     case "left": if (cols > 1) m.sel = Math.max(0, m.sel - 1); else it?.change?.(-1); break;
     case "right": if (cols > 1) m.sel = Math.min(items.length - 1, m.sel + 1); else it?.change?.(1); break;
     case "lt": m.sel = Math.max(0, m.sel - cols * 6); break;
+    case "home": m.sel = 0; break;                          // hold LT
+    case "end": m.sel = items.length - 1; break;            // hold RT
     case "rt": m.sel = Math.min(items.length - 1, m.sel + cols * 6); break;
     case "a": if (it) { if (it.activate) it.activate(); else it.change?.(1); } break;
     case "b": case "start": case "y": closeModal(); return;
@@ -643,16 +691,20 @@ function cycleGenre(d) {
 
 function cycle(list, cur, d) { return list[(list.indexOf(cur) + d + list.length) % list.length]; }
 
+async function rematchUnmatched() {
+  closeModal();
+  const r = await api("/api/rematch-unmatched", {});
+  toast(r.count ? `Looking for ${r.count} unmatched game${r.count === 1 ? "" : "s"} on Steam, Wikidata${document.body.classList.contains("lengths") ? " and IGDB" : ""}…` : "No unmatched games", 4000);
+}
 function openMenu() {
   const g = S.view[S.sel];
+  const unmatched = S.games.filter(x => !x.appid && !x.extra && !x.override).length;
   const storesPresent = STORES.filter(s => s === "All" || S.games.some(x => x.store === s));
   const refilter = () => { savePrefs(); buildView(S.view[S.sel]?.id); };
   openModal({
     title: "Menu",
     hint: `<span>◀ ▶ change</span><span><span class="btn a">A</span>Select</span><span><span class="btn b">B</span>Close</span>`,
     items: () => [
-      { label: "Sort by", value: SORTS[S.sortIdx].label, change: d => { setSort((S.sortIdx + d + SORTS.length) % SORTS.length); } },
-      { label: "Order", value: S.dir < 0 ? "Highest first" : "Lowest first", change: () => { S.dir = -S.dir; refilter(); } },
       { label: "Store", value: S.store, change: d => { S.store = cycle(storesPresent, S.store, d); refilter(); } },
       { label: "Installed only", value: S.installedOnly ? "On" : "Off", change: () => { S.installedOnly = !S.installedOnly; refilter(); } },
       { label: "Hide unrated games", value: S.hideUnrated ? "On" : "Off", change: () => { S.hideUnrated = !S.hideUnrated; refilter(); } },
@@ -660,11 +712,11 @@ function openMenu() {
         { label: "Play style", value: S.style, change: d => { S.style = cycle(Object.keys(STYLES), S.style, d); refilter(); } },
         { label: "Perspective", value: S.persp, change: d => { S.persp = cycle(Object.keys(PERSPECTIVES), S.persp, d); refilter(); } },
       ] : []),
-      { label: "Search…", activate: () => { closeModal(); focusSearch(); } },
-      { label: "Trailer sound", value: S.trailerSound ? "On" : "Off", change: () => { S.trailerSound = !S.trailerSound; savePrefs(); const v = inlineVideo(); if (v) v.muted = !S.trailerSound; } },
-      { label: "Controller test", activate: () => { closeModal(); openDiag(); } },
+      ...(unmatched ? [{ label: `Match unmatched games (${unmatched})`, activate: rematchUnmatched }] : []),
+      { label: "Settings…", activate: () => openSettings() },
       ...(g && g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
-      ...(g && g.appid ? [{ label: `Wrong Steam match for “${g.title}”`, activate: () => wrongMatch(g) }] : []),
+      ...(g && !g.extra ? [{ label: `Steam match for “${g.title}”…`, value: g.appid ? (g.override ? "set by you" : "app " + g.appid) : "none",
+                             activate: () => matchFlow(g, g.title) }] : []),
       { label: "Refresh library & new ratings", activate: () => { api("/api/refresh", {}); closeModal(); toast("Refreshing…"); } },
       { label: "Re-fetch all ratings", activate: () => { api("/api/refresh", { force: true }); closeModal(); toast("Re-fetching everything from Steam…"); } },
       { label: "Quit", activate: quit },
@@ -672,12 +724,89 @@ function openMenu() {
   });
 }
 
-function wrongMatch(g) {
-  openModal({
-    kind: "confirm", yes: "Remove match",
-    html: `Remove the Steam match <b>${esc(g.steam_name || g.appid)}</b> from <b>${esc(g.title)}</b>?<br><small>You can set the right app ID in data/overrides.json</small>`,
-    onYes: async () => { await api("/api/override", { id: g.id, appid: null }); toast("Match removed"); loadGames(); },
-  });
+// ---------------------------------------------------------------- settings
+// Twitch/IGDB credentials. The secret never comes back from the backend; values typed
+// here are only sent when saved, after Twitch has accepted them.
+const settingsDraft = { client_id: "", client_secret: "" };
+async function openSettings(sel = 0) {
+  let st;
+  try { st = (await api("/api/settings", {})).twitch; } catch { toast("Couldn't load settings", 3000); return; }
+  const fromEnv = st.source === "env";
+  const draftSet = settingsDraft.client_id || settingsDraft.client_secret;
+  const items = () => [
+    { info: true, label: "IGDB (optional): critic scores for more games, how long to beat, play styles, series and gameplay videos." },
+    { label: "Status", value: fromEnv ? "Set by environment variables" : st.set ? `Connected · ${st.client_id_hint}` : "Not set", info: true },
+    ...(fromEnv ? [] : [
+      { label: "Twitch client ID", value: settingsDraft.client_id ? settingsDraft.client_id : st.set ? st.client_id_hint : "Not set",
+        activate: () => editSetting("client_id", "Twitch client ID", false) },
+      { label: "Twitch client secret", value: settingsDraft.client_secret ? "•".repeat(10) + " (new)" : st.set ? "•".repeat(10) : "Not set",
+        activate: () => editSetting("client_secret", "Twitch client secret", true) },
+      ...(draftSet ? [{ label: "Save and check with Twitch", activate: saveTwitch }] : []),
+      ...(st.set ? [{ label: "Remove credentials", activate: removeTwitch }] : []),
+    ]),
+    { info: true, label: "Get them free at dev.twitch.tv/console → Register Your Application (OAuth redirect URL http://localhost, client type Confidential) → Client ID, then New Secret." },
+  ];
+  if (!sel) sel = items().findIndex(i => !i.info);   // start on the first thing you can change
+  openModal({ kind: "list settings", title: "Settings", hint: "A select · B close", items, sel });
+}
+function editSetting(key, title, secret) {
+  const back = S.modal.sel;
+  askText({ title, secret, value: settingsDraft[key],
+    html: secret ? "Paste or type the secret. It's stored only on this device." : "",
+    onDone: v => { settingsDraft[key] = v.trim(); openSettings(back); },
+    onCancel: () => openSettings(back) });
+}
+async function saveTwitch() {
+  if (!settingsDraft.client_id || !settingsDraft.client_secret) { toast("Enter both the client ID and the secret", 3000); return; }
+  toast("Checking with Twitch…", 2000);
+  let r;
+  try { r = await api("/api/settings/twitch", settingsDraft); } catch { r = { ok: false, error: "No reply from the app" }; }
+  if (r.ok) {
+    settingsDraft.client_id = settingsDraft.client_secret = "";
+    closeModal();
+    toast("Twitch accepted them. Fetching IGDB data…", 4000);
+  } else {
+    openModal({ kind: "confirm", yes: "OK", html: esc(r.error), onYes: () => openSettings() });
+  }
+}
+async function removeTwitch() {
+  const r = await api("/api/settings/twitch", { remove: true });
+  if (r.ok) { toast("Credentials removed", 2500); openSettings(); }
+  else openModal({ kind: "confirm", yes: "OK", html: esc(r.error), onYes: () => openSettings() });
+}
+
+// Typing text: the on-screen keyboard on a Steam Deck, a text box on a PC.
+function askText({ title, value = "", secret = false, html = "", onDone, onCancel }) {
+  if (S.steamDeck) openKeyboard({ title, value, secret, html, onDone, onCancel });
+  else openModal({ kind: "prompt", title, secret, value, html, onSave: onDone, onCancel });
+}
+
+// Menu → Steam match: pick the right Steam page for a game (or none). Results come from
+// Steam's store search and IGDB (games listing a Steam page); a number is a Steam app ID.
+function matchFlow(g, query) {
+  askText({ title: `Steam match for ${g.title}`, value: query,
+    html: "Search by name, or type the Steam app ID (the number in the game's Steam store address).",
+    onDone: q => q.trim() && matchResults(g, q.trim()) });
+}
+async function matchResults(g, q) {
+  toast("Searching…", 1500);
+  let r;
+  try { r = await api("/api/match-search", { id: g.id, query: q }); } catch { r = { results: [] }; }
+  const res = r.results || [];
+  const items = () => [
+    ...(res.length ? [] : [{ info: true, label: `Nothing found for “${q}”. Try another name, or type the Steam app ID.` }]),
+    ...res.map(x => ({ label: x.name, value: [x.year, x.src, "app " + x.appid].filter(Boolean).join(" · "),
+                       on: x.appid === g.appid, activate: () => setMatch(g, x.appid, x.name) })),
+    { label: "Search again…", activate: () => matchFlow(g, q) },
+    ...(g.appid ? [{ label: "Not on Steam (remove the match)", activate: () => setMatch(g, null) }] : []),
+  ];
+  openModal({ kind: "list", title: `Steam match for ${g.title}`, hint: "A pick · B cancel", items, sel: res.length ? 0 : items().length - 1 });
+}
+async function setMatch(g, appid, name) {
+  closeModal();
+  await api("/api/override", { id: g.id, appid });
+  toast(appid ? `Matched to ${name}. Fetching its reviews…` : "Match removed", 3500);
+  setTimeout(loadGames, 600);
 }
 
 async function quit() {
@@ -974,6 +1103,68 @@ function focusSearch() {
   els.search.focus();
   els.search.select();
 }
+// Y / Menu → Search: on a Steam Deck the app's own keyboard (Steam's keyboard is unreliable
+// for non-Steam apps); on a PC, the search box itself.
+function openSearch() {
+  if (!S.steamDeck) { focusSearch(); return; }
+  const before = S.query;
+  openKeyboard({ title: "Search", value: S.query,
+    onChange: v => { S.query = v; els.search.value = v; buildView(); select(0, true); },
+    onCancel: () => { S.query = before; els.search.value = before; buildView(); select(0, true); } });
+}
+
+// ---------------------------------------------------------------- on-screen keyboard
+// D-pad moves, A types, X deletes, Y space, LB capitals, Menu done, B cancel.
+const KB_ROWS = [
+  [..."1234567890"], [..."qwertyuiop"], [..."asdfghjkl'"], [..."zxcvbnm,.-"],
+  ["⇧ Caps", "Space", "⌫ Delete", "✓ Done"],
+];
+function openKeyboard(opts) {
+  openModal({ kind: "keyboard", r: 1, c: 0, caps: false, value: opts.value || "", ...opts });
+}
+function kbKey(m, r = m.r, c = m.c) { return KB_ROWS[r][Math.min(c, KB_ROWS[r].length - 1)]; }
+function kbPress(m, key) {
+  if (key === "⇧ Caps") m.caps = !m.caps;
+  else if (key === "Space") m.value += " ";
+  else if (key === "⌫ Delete") m.value = m.value.slice(0, -1);
+  else if (key === "✓ Done") { closeModal(); m.onDone?.(m.value); return; }
+  else m.value += m.caps ? key.toUpperCase() : key;
+  m.onChange?.(m.value);
+  if (S.modal === m) renderModal();
+}
+function kbInput(m, a) {
+  const rows = KB_ROWS.length, wide = r => KB_ROWS[r].length;
+  // moving between the 10-key rows and the 4-key bottom row keeps the position roughly
+  const toRow = (r, nr) => { m.c = Math.round(m.c * (wide(nr) - 1) / Math.max(1, wide(r) - 1)); m.r = nr; };
+  switch (a) {
+    case "up": if (m.r > 0) toRow(m.r, m.r - 1); break;
+    case "down": if (m.r < rows - 1) toRow(m.r, m.r + 1); break;
+    case "left": m.c = (m.c - 1 + wide(m.r)) % wide(m.r); break;
+    case "right": m.c = (m.c + 1) % wide(m.r); break;
+    case "a": return kbPress(m, kbKey(m));
+    case "x": return kbPress(m, "⌫ Delete");
+    case "y": return kbPress(m, "Space");
+    case "lb": return kbPress(m, "⇧ Caps");
+    case "start": return kbPress(m, "✓ Done");
+    case "b": closeModal(); m.onCancel?.(); return;
+  }
+  renderModal();
+}
+function kbHTML(m) {
+  const shown = m.secret ? "•".repeat(m.value.length) : esc(m.value);
+  return `<h3>${esc(m.title)}</h3>${m.html ? `<div class="kbhelp">${m.html}</div>` : ""}
+    <div class="kbfield">${shown}<span class="caret"></span></div>
+    <div class="kb">${KB_ROWS.map((row, r) => `<div class="kbrow">${row.map((k, c) =>
+      `<span class="kkey ${r === m.r && c === Math.min(m.c, row.length - 1) ? "sel" : ""} ${k === "⇧ Caps" && m.caps ? "on" : ""} ${row.length < 10 ? "wide" : ""}"
+             data-r="${r}" data-c="${c}">${esc(m.caps && k.length === 1 ? k.toUpperCase() : k)}</span>`).join("")}</div>`).join("")}</div>
+    <div class="hint"><span><span class="btn a">A</span>Type</span><span><span class="btn x">X</span>Delete</span>
+      <span><span class="btn y">Y</span>Space</span><span><span class="btn sh">LB</span>Caps</span>
+      <span><span class="btn glyph"><svg viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h10"/></svg></span>Done</span><span><span class="btn b">B</span>Cancel</span></div>`;
+}
+els.modal.addEventListener("click", e => {   // touch / mouse
+  const k = e.target.closest(".kkey");
+  if (k && S.modal?.kind === "keyboard") { S.modal.r = +k.dataset.r; S.modal.c = +k.dataset.c; kbPress(S.modal, kbKey(S.modal)); }
+});
 
 // ---------------------------------------------------------------- main input
 function pageSize() {
@@ -981,7 +1172,7 @@ function pageSize() {
   return row ? Math.max(1, Math.floor(els.list.clientHeight / row.offsetHeight) - 1) : 8;
 }
 
-function input(a) {
+function input(a, repeat = false) {
   document.body.classList.add("nomouse");
   if (S.modal) return modalInput(a);
   if (document.activeElement === els.search) {
@@ -989,8 +1180,9 @@ function input(a) {
     return;
   }
   switch (a) {
-    case "up": select(S.sel - 1); break;
-    case "down": select(S.sel + 1); break;
+    // at the ends a fresh press wraps round; holding (repeat) stops at the end
+    case "up": select(S.sel === 0 ? (repeat ? 0 : S.view.length - 1) : S.sel - 1); break;
+    case "down": select(S.sel === S.view.length - 1 ? (repeat ? S.sel : 0) : S.sel + 1); break;
     case "lt": select(S.sel - pageSize()); break;
     case "rt": select(S.sel + pageSize()); break;
     case "left": stepVideo(-1); break;     // D-pad ◀ ▶: previous / next video
@@ -998,16 +1190,10 @@ function input(a) {
     case "home": select(0); break;
     case "end": select(S.view.length - 1); break;
     case "a": launchSelected(); break;
-    case "b":
-      if (S.query || S.genre || S.store !== "All" || S.installedOnly || S.hideUnrated || S.style !== "Any" || S.persp !== "Any") {
-        S.query = ""; els.search.value = ""; S.genre = null; S.store = "All"; S.installedOnly = false; S.hideUnrated = false;
-        S.style = "Any"; S.persp = "Any";
-        savePrefs(); buildView(S.view[S.sel]?.id); toast("Filters cleared");
-      } else select(0);
-      break;
+    case "b": openGenres(); break;
     case "x": setSort((S.sortIdx + 1) % SORTS.length); toast("Sort: " + SORTS[S.sortIdx].label, 1200); break;
     case "select": S.dir = -S.dir; savePrefs(); buildView(S.view[S.sel]?.id); break;
-    case "y": openGenres(); break;
+    case "y": openSearch(); break;
     case "lb": cycleGenre(-1); break;
     case "rb": cycleGenre(1); break;
     case "start": openMenu(); break;
@@ -1020,7 +1206,9 @@ function input(a) {
 // Gamepad (standard mapping; Steam Input presents an Xbox-style pad)
 const PAD = { a: 0, b: 1, x: 2, y: 3, lb: 4, rb: 5, lt: 6, rt: 7, select: 8, start: 9, r3: 11, up: 12, down: 13, left: 14, right: 15,
               vprev: -1, vnext: -1 };   // right stick ◀ ▶ (set from the axis in readPads)
-const REPEAT = new Set(["up", "down", "left", "right", "lt", "rt"]);
+const REPEAT = new Set(["up", "down", "left", "right"]);
+const JUMP = { lt: "home", rt: "end" };   // tap LT/RT: page; hold half a second: top/bottom
+const JUMP_HOLD_MS = 500;
 const held = {};
 function readPads(scroll = true) {
   const st = {};
@@ -1045,9 +1233,22 @@ function readPads(scroll = true) {
   return st;
 }
 // Never let an error in one action kill controller input for good.
-function safeInput(a) {
-  try { input(a); } catch (e) { console.error(e); toast("Error: " + e.message, 6000); }
+function safeInput(a, repeat = false) {
+  try { input(a, repeat); } catch (e) { console.error(e); reportError(e, "input " + a); toast("Error: " + e.message, 6000); }
 }
+// Errors in the page go to the app's log (logs/app.log), at most 20 a minute.
+let reported = [];
+function reportError(err, where = "") {
+  const now = Date.now();
+  reported = reported.filter(t => now - t < 60000);
+  if (reported.length >= 20) return;
+  reported.push(now);
+  const message = `${where ? where + ": " : ""}${err?.message || err}`;
+  fetch("/api/log", { method: "POST", headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ level: "error", message, stack: err?.stack || "" }) }).catch(() => {});
+}
+window.addEventListener("error", e => reportError(e.error || e.message, "page"));
+window.addEventListener("unhandledrejection", e => reportError(e.reason, "promise"));
 // ---------------------------------------------------------------- pause while Heroic/a game is in front
 // The Gamepad API keeps reporting buttons even when another window (Heroic, a game)
 // is on top, so we ignore the pad when unfocused, and after launching/installing we
@@ -1079,43 +1280,9 @@ function swallowHeld(st, now) {
   }
 }
 
-// ---------------------------------------------------------------- controller test screen
-// Shows exactly what the app receives (raw gamepad buttons and keyboard keys), so button
-// mapping problems on a particular setup can be diagnosed. Nothing acts while it's open.
-let diag = null; // { keys: [], holdA: 0, enterDown: 0 }
-function openDiag() {
-  diag = { keys: [], holdA: 0, enterDown: 0 };
-  $("diag").hidden = false;
-}
-function closeDiag() {
-  diag = null;
-  $("diag").hidden = true;
-  swallowHeld(readPads(false), performance.now()); // buttons still held must not act
-}
-$("diagClose").addEventListener("click", closeDiag);
-function renderDiag(now) {
-  const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
-  let aDown = false;
-  const lines = [`Window focused: ${document.hasFocus() ? "yes" : "no"}   Steam Deck: ${S.steamDeck ? "yes" : "no"}`, ""];
-  if (!pads.length) lines.push("No gamepads seen (press a button)");
-  pads.forEach((p, n) => {
-    const down = p.buttons.map((b, i) => (b.pressed || b.value > 0.5 ? i : null)).filter(i => i !== null);
-    if (down.includes(0)) aDown = true;
-    const axes = p.axes.map(a => a.toFixed(1)).join(" ");
-    lines.push(`Pad ${n}: ${p.id}`, `  mapping: ${p.mapping || "(none)"}   buttons: ${p.buttons.length}`,
-               `  pressed: ${down.length ? down.join(", ") : "-"}`, `  axes: ${axes}`, "");
-  });
-  lines.push("Keyboard keys received (newest first):", ...(diag.keys.length ? diag.keys : ["-"]));
-  $("diagOut").textContent = lines.join("\n");
-  // Hold A (button 0) for 2 s to close.
-  if (aDown) { diag.holdA = diag.holdA || now; if (now - diag.holdA > 2000) closeDiag(); }
-  else diag.holdA = 0;
-}
-
 function padLoop(now) {
   requestAnimationFrame(padLoop);  // schedule first, so an exception can't stop the loop
   notePadButtons();
-  if (diag) { renderDiag(now); return; }
   if (!document.hasFocus()) {      // another window has focus: never act on the pad
     swallowHeld(readPads(false), now);
     return;
@@ -1136,10 +1303,13 @@ function padLoop(now) {
       if (!h) {
         held[k] = { start: now, next: now + 350 };
         safeInput(k);
+      } else if (JUMP[k] && !h.jumped && now - h.start >= JUMP_HOLD_MS) {
+        h.jumped = true;
+        safeInput(JUMP[k]);
       } else if (REPEAT.has(k) && now >= h.next) {
         const fast = now - h.start > 1500;
-        h.next = now + (k === "lt" || k === "rt" ? 180 : fast ? 35 : 70);
-        safeInput(k);
+        h.next = now + (fast ? 35 : 70);
+        safeInput(k, true);
       }
     } else delete held[k];
   }
@@ -1165,25 +1335,29 @@ function notePadButtons() {
 const KEYS = {
   ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Enter: "a", " ": "y",
   Control: "lb", Alt: "rb",
-  Escape: "start", Backspace: "b", x: "x", s: "x", y: "y", g: "y", q: "lb", "[": "lb", e: "rb", "]": "rb",
+  Escape: "start", Backspace: "b", x: "x", s: "x", y: "y", g: "b", q: "lb", "[": "lb", e: "rb", "]": "rb",
   PageUp: "lt", PageDown: "rt", r: "select", m: "start", Tab: "select", Home: "home", End: "end", v: "r3",
 };
 document.addEventListener("keydown", e => {
-  if (diag) {  // controller test: log keys, act on nothing (holding Enter for 2 s closes)
-    e.preventDefault();
-    if (!e.repeat) diag.keys.unshift(`${e.key}  (code ${e.code})`);
-    diag.keys = diag.keys.slice(0, 8);
-    if (e.key === "Enter") { if (!e.repeat) diag.enterDown = Date.now(); else if (Date.now() - diag.enterDown > 2000) closeDiag(); }
-    return;
-  }
   if (paused) { e.preventDefault(); resume(); return; }  // a key event means this window has focus
   if (document.activeElement === els.search) {
     if (["Escape", "Enter", "ArrowDown", "Tab"].includes(e.key)) { e.preventDefault(); els.search.blur(); }
     return;
   }
+  if (S.modal?.kind === "keyboard") {   // a physical keyboard types into the on-screen one too
+    const m = S.modal;
+    if (e.key.length === 1 && !e.ctrlKey && !e.altKey) { e.preventDefault(); m.value += e.key; m.onChange?.(m.value); renderModal(); return; }
+    if (e.key === "Backspace") { e.preventDefault(); kbPress(m, "⌫ Delete"); return; }
+    if (e.key === "Enter") { e.preventDefault(); kbPress(m, "✓ Done"); return; }
+    if (e.key === "Escape") { e.preventDefault(); kbInput(m, "b"); return; }
+  }
+  if (document.activeElement?.id === "promptInput") {
+    if (e.key === "Enter" || e.key === "Escape") { e.preventDefault(); modalInput(e.key === "Enter" ? "a" : "b"); }
+    return;
+  }
   if (e.key === "/") { e.preventDefault(); focusSearch(); return; }
   const a = KEYS[e.key];
-  if (a) { e.preventDefault(); safeInput(a); }
+  if (a) { e.preventDefault(); safeInput(a, e.repeat); }
   if (S.steamDeck && (e.key === "Tab" || e.key === "Escape")) showLayoutWarn(true);  // Steam's Desktop layout sends these
 });
 

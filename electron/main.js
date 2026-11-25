@@ -24,7 +24,21 @@ app.commandLine.appendSwitch("disable-http-cache"); // UI is local; keeps update
 // Keep Electron's own state with the app data (the app folder, or ~/.local/share/... for the AppImage).
 app.setPath("userData", path.join(process.env.HEROIC_RATINGS_DATA || path.join(ROOT, "data"), "electron"));
 
-function log(...a) { console.error("[heroic-ratings]", ...a); }
+// Log to stderr and to <data>/logs/electron.log (one old file kept), so problems in the
+// window are visible after the fact, e.g. a renderer killed for running out of memory.
+const LOG_FILE = path.join(process.env.HEROIC_RATINGS_DATA || path.join(ROOT, "data"), "logs", "electron.log");
+function log(...a) {
+  const line = `${new Date().toISOString()} ${a.map(x => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")}`;
+  console.error("[heroic-ratings]", ...a);
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 1_000_000) fs.renameSync(LOG_FILE, LOG_FILE + ".1");
+    fs.appendFileSync(LOG_FILE, line + "\n");
+  } catch { /* logging must never break the app */ }
+}
+process.on("uncaughtException", e => log("uncaught exception:", e.stack || String(e)));
+app.on("render-process-gone", (_e, _wc, d) => log("page process gone:", d));        // e.g. reason "oom", "crashed"
+app.on("child-process-gone", (_e, d) => log("child process gone:", d));             // GPU, network, video decoding…
 
 function pythonBin() {
   const bundled = path.join(ROOT, "runtime", "python", "bin", "python3");
@@ -119,6 +133,13 @@ async function createWindow() {
                       preload: path.join(__dirname, "preload.js") },
   });
   win.setMenu(null);
+  win.on("unresponsive", () => log("window stopped responding"));
+  win.on("responsive", () => log("window responding again"));
+  win.webContents.on("console-message", (e, level, message, line, source) => {
+    // newer Electron passes one event object (level "error"); older ones positional args (level 3)
+    const lvl = e?.level ?? level, msg = e?.message ?? message;
+    if (lvl === "error" || lvl === 3) log("page error:", msg, `(${path.basename(e?.sourceId ?? source ?? "")}:${e?.lineNumber ?? line})`);
+  });
   // Only ever show our own local page.
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (e, url) => { if (!url.startsWith(base)) e.preventDefault(); });
@@ -130,6 +151,7 @@ async function createWindow() {
   // "Step aside" for Heroic: leave fullscreen and minimise so Heroic's own windows
   // (its install dialog) are visible. Fullscreen comes back when the player returns.
   let steppedAside = false;
+  log("window ready:", base, WINDOWED ? "windowed" : "fullscreen", `Electron ${process.versions.electron}`);
   ipcMain.on("step-aside", e => {
     if (e.sender !== win.webContents || win.isMinimized()) return;
     const wasFull = win.isFullScreen();
