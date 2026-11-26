@@ -260,6 +260,24 @@ class Interface(unittest.TestCase):
         self.assertEqual(ev("S.modal.sel"), ev("S.modal.items().length - 1"))
         page.close()
 
+    def test_queued_jobs_show_on_rows_and_can_be_cancelled(self):
+        jobs = [{"id": "legendary:beta", "kind": "install", "state": "running", "position": 1},
+                {"id": "legendary:gamma", "kind": "install", "state": "queued", "position": 2},
+                {"id": "legendary:alpha", "kind": "uninstall", "state": "queued", "position": 3}]
+        self.page.route("**/api/downloads", lambda route: route.fulfill(json={"running": False, "jobs": jobs}))
+        self.ev("pollDownloads()")
+        self.page.wait_for_function("S.downloads['legendary:gamma']")
+        badge = lambda t: self.ev(f"[...document.querySelectorAll('.row')].find(r => r.querySelector('.name').textContent === {t!r}).querySelector('.badge')?.textContent")
+        self.assertEqual(badge("Bravo Racer"), "Starting…")
+        self.assertEqual(badge("Gamma Online"), "Queued #2")
+        self.assertEqual(badge("Alpha Quest"), "Uninstall queued #3")
+        self.ev("select(S.view.findIndex(g => g.title === 'Gamma Online'), true); input('a')")
+        self.assertFalse(self.ev("!!S.modal"), "a queued game isn't offered again")
+        self.ev("input('start')")
+        self.assertIn("Cancel queued install of “Gamma Online”", self.ev("S.modal.items().map(i => i.label)"))
+        self.ev("input('b')")
+        self.page.unroute("**/api/downloads")
+
     def test_page_errors_reach_the_app_log(self):
         self.ev("setTimeout(() => { throw new Error('ui test boom'); })")
         self.page.wait_for_timeout(500)

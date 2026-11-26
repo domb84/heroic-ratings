@@ -715,6 +715,7 @@ function openMenu() {
       ...(unmatched ? [{ label: `Match unmatched games (${unmatched})`, activate: rematchUnmatched }] : []),
       { label: "Settings…", activate: () => openSettings() },
       ...(g && g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
+      ...(g && S.downloads[g.id]?.queued ? [{ label: `Cancel queued ${S.downloads[g.id].kind} of “${g.title}”`, activate: () => cancelQueued(g) }] : []),
       ...(g && !g.extra ? [{ label: `Steam match for “${g.title}”…`, value: g.appid ? (g.override ? "set by you" : "app " + g.appid) : "none",
                              activate: () => matchFlow(g, g.title) }] : []),
       { label: "Refresh library & new ratings", activate: () => { api("/api/refresh", {}); closeModal(); toast("Refreshing…"); } },
@@ -826,6 +827,7 @@ function setSort(i) {
 function launchSelected() {
   const g = S.view[S.sel];
   if (!g) return;
+  if (S.downloads[g.id]?.queued || S.downloads[g.id]?.starting) { toast(`${g.title} is already in the queue`, 3000); return; }
   if (!g.installed) {
     openModal({
       kind: "confirm", yes: "Install",
@@ -947,12 +949,18 @@ function openInstallOptions(g, o) {
   openModal(m);
 }
 
+// Installs and uninstalls go into the app's queue and run one at a time.
+function queuedToast(kind, g, r) {
+  if (r.ok) toast(r.position > 1 ? `${kind === "install" ? "Install" : "Uninstall"} of ${g.title} queued (#${r.position})`
+                                 : `${kind === "install" ? "Installing" : "Uninstalling"} ${g.title}…`, 3500);
+  else if (r.error === "already-queued") toast(`${g.title} is already in the queue`, 3000);
+  else heroicProblem(r.error, `${kind} <b>${esc(g.title)}</b>`, "");
+  if (r.ok) pollDownloads();
+}
 async function startInstall(g, options) {
   let r;
   try { r = await api("/api/install-start", { id: g.id, options }); } catch { r = { error: "network" }; }
-  if (r.result === "queued") { toast(`${g.title} added to Heroic's downloads`, 3500); setTimeout(pollDownloads, 1000); }
-  else if (r.result === "installed") toast(`${g.title} is already installed`, 3500);
-  else heroicProblem(r.error || r.result, `install <b>${esc(g.title)}</b>`, "");
+  queuedToast("install", g, r);
 }
 
 // Uninstalling, with the same choices as Heroic's uninstall dialog (both off by default).
@@ -985,16 +993,15 @@ async function uninstallFlow(g) {
 }
 
 async function startUninstall(g, st) {
-  // Show "Uninstalling…" straight away; pollDownloads keeps it until the library shows the game as removed.
-  const mark = on => {
-    if (on) S.downloads[g.id] = { uninstalling: true, was: true, since: Date.now() }; else delete S.downloads[g.id];
-    if (rowCache.has(g.id)) { const el = rowEl(g); if (S.view[S.sel]?.id === g.id) { el.classList.add("sel"); renderDetail(g); } }
-  };
-  mark(true);
   let r;
   try { r = await api("/api/uninstall-start", { id: g.id, removePrefix: st.prefix, removeSettings: st.settings }); } catch { r = { error: "network" }; }
-  if (r.result === "started" || r.result === "done") { toast(`Uninstalling ${g.title}…`, 3000); setTimeout(pollDownloads, 800); }
-  else { mark(false); heroicProblem(r.error || r.result, `uninstall <b>${esc(g.title)}</b>`, ""); }
+  queuedToast("uninstall", g, r);
+}
+async function cancelQueued(g) {
+  closeModal();
+  const r = await api("/api/queue-cancel", { id: g.id });
+  toast(r.ok ? `Removed ${g.title} from the queue` : `${g.title} has already started`, 3000);
+  pollDownloads();
 }
 
 // Download progress from Heroic's queue, shown on the game's row and in its details.
@@ -1002,6 +1009,8 @@ S.downloads = {};
 function downloadText(g, long = false) {
   const d = S.downloads[g.id];
   if (!d) return "";
+  if (d.queued) return d.kind === "uninstall" ? `Uninstall queued #${d.pos}` : `Queued #${d.pos}`;
+  if (d.starting) return "Starting…";
   if (d.uninstalling) return "Uninstalling…";
   if (d.finishing) return long ? "Finishing install…" : "Finishing…";
   if (!d.active) return long ? "Queued in Heroic · keep this app open until it finishes" : "Queued";
@@ -1010,6 +1019,7 @@ function downloadText(g, long = false) {
   return ["Downloading " + pct, d.speed ? d.speed.toFixed(1) + " MiB/s" : "", d.eta ? d.eta + " left" : "",
           "keep this app open until it finishes"].filter(Boolean).join(" · ");
 }
+const reportedJobs = new Set();
 async function pollDownloads() {
   let d;
   try { d = await api("/api/downloads", {}); } catch { return; }
@@ -1020,6 +1030,16 @@ async function pollDownloads() {
                                           speed: pr.progress?.downSpeed, eta: pr.progress?.eta };
   });
   if (d.running) for (const u of d.uninstalling || []) next[`${u.runner}:${u.appName}`] = { uninstalling: true };
+  // the app's own queue: waiting jobs, and the running one before Heroic reports on it
+  for (const j of d.jobs || []) {
+    if (j.state === "queued") next[j.id] = { queued: true, kind: j.kind, pos: j.position };
+    else if (j.state === "running" && !next[j.id]) next[j.id] = j.kind === "uninstall" ? { uninstalling: true } : { starting: true };
+    else if ((j.state === "failed" || j.state === "done") && !reportedJobs.has(j.n)) {
+      reportedJobs.add(j.n);
+      const g = S.games.find(x => x.id === j.id);
+      if (j.state === "failed") toast(`Couldn't ${j.kind} ${g?.title || "the game"}: ${j.error}`, 6000);
+    }
+  }
   // Heroic says it's done, but our library may not show the change yet: keep the status
   // ("Uninstalling…" / "Finishing…") until the installed state flips, or for at most 30 s.
   const now = Date.now();

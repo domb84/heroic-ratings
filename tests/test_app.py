@@ -307,7 +307,7 @@ class Api(unittest.TestCase):
 
     def test_downloads_mark_busy_only_when_heroic_is_working(self):
         h.heroic_downloads = lambda d: {"running": False}
-        self.assertEqual(self.srv.post("/api/downloads")[1], {"running": False})
+        self.assertEqual(self.srv.post("/api/downloads")[1], {"running": False, "jobs": []})
         self.assertLess(self.st.busy_until, time.time())
         h.heroic_downloads = lambda d: {"running": True, "queue": [{"appName": "beta", "runner": "legendary"}], "uninstalling": []}
         self.srv.post("/api/downloads")

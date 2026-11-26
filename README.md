@@ -137,6 +137,10 @@ The download and install size update as you change things. **Install** is blocke
 
 **Why it works this way:** Heroic 2.22.4 can't take install requests from other apps. Its *"…is not installed, do you wish to install it?"* prompt appears, but its Yes button does nothing ([Heroic issue #6053](https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/issues/6053)). As a workaround, the app starts Heroic with Chromium's remote-debugging port (a free port Heroic picks, `127.0.0.1` only), and the app uses it to navigate Heroic's own window. Heroic still does all the downloading and installing.
 
+## The install / uninstall queue
+
+Installs and uninstalls go into the app's own queue and run **one at a time**: each starts only when the previous one has finished (an install when its download is done, an uninstall when the game is gone). You can queue several, mixing installs and uninstalls; each game's row shows its place (*Queued #2*, *Uninstall queued #3*), and **Menu → Cancel queued …** takes a waiting one out again. A job that fails shows a message with the reason and doesn't hold up the rest. Launching a game waits until the queue is empty, because it closes the background Heroic the queue runs in.
+
 ## Uninstalling games
 
 Choose **Menu → Uninstall "…"** with an installed game selected. You get the same choices as Heroic's own uninstall dialog, both off by default:

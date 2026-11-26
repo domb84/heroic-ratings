@@ -799,6 +799,19 @@ class State:
         self.force = False
         self.version = 0  # bumps when data changes so the UI can refresh
         self.busy_until = 0.0  # Heroic downloading/uninstalling: the health log samples more often
+        self.ops = OpQueue(run=self._run_op, status=lambda: heroic_downloads(self.heroic), is_installed=self._installed_now)
+
+    def _run_op(self, job: dict) -> dict:
+        p = job["params"]
+        if job["kind"] == "install":
+            return install_with_options(job["runner"], job["app_name"], p, self.heroic)
+        return start_uninstall(job["runner"], job["app_name"], p.get("removePrefix") is True,
+                               p.get("removeSettings") is True, self.heroic)
+
+    def _installed_now(self, gid: str) -> bool:
+        self.maybe_reload_library(force=True)
+        g = next((g for g in self.games if g["id"] == gid), None)
+        return bool(g and g["installed"])
 
     def mark_busy(self, secs: float = 120):
         self.busy_until = max(self.busy_until, time.time() + secs)
@@ -1677,9 +1690,12 @@ def _cdp_eval(ws_url: str, expr: str, timeout: float = 20):
                 break
     finally:
         ws.close()
+    if "error" in msg:   # e.g. "Execution context was destroyed." while the page navigates
+        raise RuntimeError(msg["error"].get("message", "debug protocol error"))
     res = msg.get("result", {})
     if "exceptionDetails" in res:
-        raise RuntimeError(res["exceptionDetails"].get("text", "script error"))
+        ex = res["exceptionDetails"]
+        raise RuntimeError((ex.get("exception") or {}).get("description") or ex.get("text", "script error"))
     return res.get("result", {}).get("value")
 
 
@@ -1750,28 +1766,72 @@ def _active_debug_port(heroic_dir: Path | None, newer_than: float = 0) -> int | 
         return None
 
 
+# Heroic's debug port and window exist before its page has loaded (it starts on a blank
+# page and then navigates to its UI), and a script run in between is destroyed by the
+# navigation. So wait until the page is complete and Heroic's API is there.
+_READY_JS = "document.readyState === 'complete' && !!window.api && location.protocol !== 'about:'"
+
+
+def _ready_page(port: int, deadline: float) -> str | None:
+    """The debug socket of Heroic's window once its UI has loaded, or None by the deadline."""
+    while True:
+        ws = _heroic_page_ws(port)
+        if ws:
+            try:
+                if _cdp_eval(ws, _READY_JS, timeout=5) is True:
+                    return ws
+            except (OSError, RuntimeError, ValueError):
+                pass   # navigating / not ready yet
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
 def ensure_debug_heroic(heroic_dir: Path | None, wait: float = 45) -> dict:
-    """Make sure a hidden Heroic with its debug port is running (started by us if needed).
+    """Make sure a hidden Heroic with its debug port is running (started by us if needed)
+    and its UI has loaded.
 
     Returns {"ws": <debug socket of Heroic's window>} or {"error": ...}. A Heroic started
     some other way has no debug port, so the user is asked to quit it instead.
     """
+    deadline = time.time() + wait
     port = _active_debug_port(heroic_dir)
-    ws = _heroic_page_ws(port) if port else None
-    if ws:
-        return {"ws": ws}
+    if port and _heroic_page_ws(port):
+        ws = _ready_page(port, deadline)
+        return {"ws": ws} if ws else {"error": "heroic-not-ready"}
     if heroic_running():
         return {"error": "heroic-running"}
     started = time.time()
     spawn_detached(heroic_debug_command())
-    while time.time() < started + wait:
+    while time.time() < deadline:
         time.sleep(0.5)
         port = _active_debug_port(heroic_dir, newer_than=started - 2)
-        ws = _heroic_page_ws(port) if port else None
-        if ws:
-            return {"ws": ws}
-    log("Heroic didn't come up (debug port file:", port, ")")
+        if port and _heroic_page_ws(port):
+            ws = _ready_page(port, deadline)
+            if ws:
+                log(f"Heroic ready after {time.time() - started:.1f}s")
+                return {"ws": ws}
+            break
+    log("Heroic didn't come up (debug port file:", port, ")", level=logging.WARNING)
     return {"error": "heroic-not-started"}
+
+
+def heroic_eval(heroic_dir: Path | None, js: str, timeout: float, what: str) -> dict:
+    """Run a script in Heroic's window: {"value": ...} or {"error": ..., "detail": ...}.
+    A script interrupted by Heroic still loading is retried (twice)."""
+    last = None
+    for attempt in range(3):
+        r = ensure_debug_heroic(heroic_dir)
+        if "error" in r:
+            log(what, "failed:", r["error"], level=logging.WARNING)
+            return r
+        try:
+            return {"value": _cdp_eval(r["ws"], js, timeout=timeout)}
+        except (OSError, RuntimeError, ValueError) as e:
+            last = e
+            log(what, f"failed (attempt {attempt + 1} of 3):", repr(e), level=logging.WARNING)
+            time.sleep(1.5)
+    return {"error": "script", "detail": str(last)}
 
 
 def game_shortcut_status(runner: str, app_name: str) -> str:
@@ -1878,6 +1938,8 @@ _INSTALL_WITH_JS = r"""
   const gameInfo = await until(() => api.getGameInfo(p.appName, p.runner), 30);
   if (!gameInfo) return 'unknown-game';
   if (gameInfo.is_installed) return 'installed';
+  const q = await api.getDMQueueInformation();   // already queued (e.g. a retried request)
+  if ((q.elements || []).some(e => e.params.appName === p.appName)) return 'queued';
   if (p.platformToInstall === 'Windows') {
     // Like Heroic's install dialog: its own prefix unless "shared" was chosen, plus the Wine/Proton picked.
     const app = await api.requestAppSettings();
@@ -1925,6 +1987,10 @@ _UNINSTALL_JS = r"""
 (async (appName, runner, removePrefix, removeSettings) => {
   const api = window.api;
   if (!api) return 'not-ready';
+  const p = (window.__heroicRatingsProgress || {})[appName];
+  if (p && p.status === 'uninstalling') return 'started';   // already running (e.g. a retried request)
+  const gi = await api.getGameInfo(appName, runner);
+  if (gi && !gi.is_installed) return 'done';
   const done = api.uninstall(appName, runner, removePrefix, removeSettings).then(() => 'done', () => 'error');
   return await Promise.race([done, new Promise(r => setTimeout(() => r('started'), 3000))]);
 })(%s, %s, %s, %s)
@@ -1989,15 +2055,11 @@ def install_locations(default_path: str | None) -> list[dict]:
 
 
 def install_options(runner: str, app_name: str, platform: str, heroic_dir: Path | None) -> dict:
-    r = ensure_debug_heroic(heroic_dir)
+    r = heroic_eval(heroic_dir, _INSTALL_OPTIONS_JS % (_JS_UNTIL, json.dumps(app_name), json.dumps(runner),
+                                                       json.dumps(platform or "Windows")), 100, "install options")
     if "error" in r:
         return r
-    try:
-        opts = _cdp_eval(r["ws"], _INSTALL_OPTIONS_JS % (_JS_UNTIL, json.dumps(app_name), json.dumps(runner),
-                                                         json.dumps(platform or "Windows")), timeout=100)
-    except (OSError, RuntimeError, ValueError) as e:
-        log("install options failed:", e)
-        return {"error": "script", "detail": str(e)}
+    opts = r["value"]
     if not isinstance(opts, dict):
         return {"error": "script", "detail": repr(opts)}
     if "error" not in opts:
@@ -2017,43 +2079,32 @@ def install_with_options(runner: str, app_name: str, o: dict, heroic_dir: Path |
               "installDlcs": strs(o.get("dlcs")), "sdlList": strs(o.get("sdl")),
               "installLanguage": o.get("language") if isinstance(o.get("language"), str) else ""}
     wine = o.get("wine") if isinstance(o.get("wine"), str) and params["platformToInstall"] == "Windows" else None
-    r = ensure_debug_heroic(heroic_dir)
+    r = heroic_eval(heroic_dir, _INSTALL_WITH_JS % (_JS_UNTIL, json.dumps(params), json.dumps(wine),
+                                                    json.dumps(o.get("sharedPrefix") is True)), 60, "install")
     if "error" in r:
         return r
-    try:
-        result = _cdp_eval(r["ws"], _INSTALL_WITH_JS % (_JS_UNTIL, json.dumps(params), json.dumps(wine),
-                                                        json.dumps(o.get("sharedPrefix") is True)), timeout=60)
-    except (OSError, RuntimeError, ValueError) as e:
-        log("install failed:", e)
-        return {"error": "script", "detail": str(e)}
-    log("install:", app_name, params["platformToInstall"], path, "->", result)
-    return {"result": result}
+    log("install:", app_name, params["platformToInstall"], path, "->", r["value"])
+    return {"result": r["value"]}
 
 
 def uninstall_options(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
-    r = ensure_debug_heroic(heroic_dir)
+    r = heroic_eval(heroic_dir, _UNINSTALL_OPTIONS_JS % (_JS_UNTIL, json.dumps(app_name), json.dumps(runner)),
+                    60, "uninstall options")
     if "error" in r:
         return r
-    try:
-        o = _cdp_eval(r["ws"], _UNINSTALL_OPTIONS_JS % (_JS_UNTIL, json.dumps(app_name), json.dumps(runner)), timeout=60)
-    except (OSError, RuntimeError, ValueError) as e:
-        return {"error": "script", "detail": str(e)}
+    o = r["value"]
     return o if isinstance(o, dict) else {"error": "script", "detail": repr(o)}
 
 
 def start_uninstall(runner: str, app_name: str, remove_prefix: bool, remove_settings: bool,
                     heroic_dir: Path | None) -> dict:
-    r = ensure_debug_heroic(heroic_dir)
+    r = heroic_eval(heroic_dir, _UNINSTALL_JS % (json.dumps(app_name), json.dumps(runner),
+                                                 json.dumps(bool(remove_prefix)), json.dumps(bool(remove_settings))),
+                    15, "uninstall")
     if "error" in r:
         return r
-    try:
-        result = _cdp_eval(r["ws"], _UNINSTALL_JS % (json.dumps(app_name), json.dumps(runner),
-                                                     json.dumps(bool(remove_prefix)), json.dumps(bool(remove_settings))),
-                           timeout=15)
-    except (OSError, RuntimeError, ValueError) as e:
-        return {"error": "script", "detail": str(e)}
-    log("uninstall:", app_name, "prefix" if remove_prefix else "", "settings" if remove_settings else "", "->", result)
-    return {"result": result}
+    log("uninstall:", app_name, "prefix" if remove_prefix else "", "settings" if remove_settings else "", "->", r["value"])
+    return {"result": r["value"]}
 
 
 def heroic_downloads(heroic_dir: Path | None) -> dict:
@@ -2067,6 +2118,146 @@ def heroic_downloads(heroic_dir: Path | None) -> dict:
     except (OSError, RuntimeError, ValueError):
         return {"running": False}
     return {"running": True, **(d if isinstance(d, dict) else {})}
+
+
+# ------------------------------------------------------------------- install / uninstall queue
+#
+# Installs and uninstalls queue up here and run one at a time: each starts only when the
+# previous one has finished (an install when its download has left Heroic's queue, an
+# uninstall when Heroic stops reporting it). A failed job doesn't hold up the rest.
+
+class OpQueue:
+    def __init__(self, run, status, is_installed, poll_secs: float = 3, sleep=time.sleep, clock=time.time):
+        """run(job) -> {"result"} | {"error"}; status() -> heroic_downloads(); is_installed(gid) -> bool."""
+        self.run, self.status, self.is_installed = run, status, is_installed
+        self.poll_secs, self.sleep, self.clock = poll_secs, sleep, clock
+        self.jobs: list[dict] = []          # queued + running, in order
+        self.finished: list[dict] = []      # most recent last (kept briefly for the UI)
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.seq = 0
+
+    # -- used by the HTTP handler
+    def add(self, kind: str, game: dict, params: dict) -> dict:
+        with self.lock:
+            if any(j["gid"] == game["id"] for j in self.jobs):
+                return {"error": "already-queued"}
+            self.seq += 1
+            job = {"n": self.seq, "kind": kind, "gid": game["id"], "title": game["title"], "runner": game["runner"],
+                   "app_name": game["app_name"], "params": params, "state": "queued", "added": self.clock()}
+            self.jobs.append(job)
+            pos = len(self.jobs)
+        log("queued", kind, game["title"], f"(position {pos})")
+        self.wake.set()
+        return {"ok": True, "position": pos}
+
+    def cancel(self, gid: str) -> bool:
+        with self.lock:
+            for j in self.jobs:
+                if j["gid"] == gid and j["state"] == "queued":
+                    self.jobs.remove(j)
+                    log("cancelled queued", j["kind"], j["title"])
+                    return True
+        return False
+
+    def pending(self) -> int:
+        with self.lock:
+            return len(self.jobs)
+
+    def view(self) -> list[dict]:
+        """For the UI: queued/running jobs with their position, plus recent results."""
+        with self.lock:
+            now = self.clock()
+            self.finished = [j for j in self.finished if now - j["ended"] < 120]
+            return ([{"id": j["gid"], "kind": j["kind"], "state": j["state"], "position": i + 1}
+                     for i, j in enumerate(self.jobs)] +
+                    [{"id": j["gid"], "kind": j["kind"], "state": j["state"], "error": j.get("error"), "n": j["n"]}
+                     for j in self.finished])
+
+    # -- the worker
+    def step(self) -> bool:
+        """Run the next job to completion. Returns False if there was nothing to do."""
+        with self.lock:
+            job = self.jobs[0] if self.jobs else None
+            if job:
+                job["state"] = "running"
+        if not job:
+            return False
+        log("starting", job["kind"], job["title"])
+        try:
+            error = self._run(job)
+        except Exception as e:   # one bad job mustn't stop the queue
+            log_error("queue job crashed:", job["kind"], job["title"], exc=e)
+            error = "crashed"
+        with self.lock:
+            self.jobs.remove(job)
+            job.update(state="failed" if error else "done", error=error, ended=self.clock())
+            self.finished.append(job)
+        log(job["kind"], job["title"], "->", f"failed ({error})" if error else "done")
+        return True
+
+    def _wait(self, still_running, max_secs: float) -> bool:
+        """Poll until still_running() is False. Returns False on timeout."""
+        start = self.clock()
+        while still_running():
+            if self.clock() - start > max_secs:
+                return False
+            self.sleep(self.poll_secs)
+        return True
+
+    def _run(self, job) -> str | None:
+        app, gid = job["app_name"], job["gid"]
+        self.status()                                   # make sure Heroic's progress listener is in place
+        r = self.run(job)
+        if "error" in r:
+            return r.get("detail") or r["error"]
+        res = r.get("result")
+        if job["kind"] == "install":
+            if res == "installed":
+                return None
+            if res != "queued":
+                return f"Heroic answered {res!r}"
+            seen = {"in_queue": False}
+            started = self.clock()
+
+            def downloading():
+                d = self.status()
+                if not d.get("running"):
+                    raise RuntimeError("Heroic closed")
+                inq = any(q.get("appName") == app for q in d.get("queue") or [])
+                seen["in_queue"] |= inq
+                # not in Heroic's queue: finished, or (if never seen) it never got there
+                return inq or (not seen["in_queue"] and self.clock() - started < 30)
+            try:
+                if not self._wait(downloading, max_secs=24 * 3600):
+                    return "timed out"
+            except RuntimeError as e:
+                return str(e)
+            return None if self.is_installed(gid) else "Heroic finished without installing it"
+        # uninstall
+        if res not in ("started", "done"):
+            return f"Heroic answered {res!r}"
+
+        def uninstalling():
+            d = self.status()
+            return d.get("running") and any(u.get("appName") == app for u in d.get("uninstalling") or [])
+        if res == "started" and not self._wait(uninstalling, max_secs=3600):
+            return "timed out"
+        for _ in range(10):                            # Heroic's installed list can lag a moment
+            if not self.is_installed(gid):
+                return None
+            self.sleep(1)
+        return "still installed afterwards"
+
+    def worker(self):
+        while True:
+            if not self.step():
+                self.wake.wait()
+                self.wake.clear()
+
+    def start(self):
+        threading.Thread(target=self.worker, name="queue", daemon=True).start()
+        return self
 
 
 # ------------------------------------------------------------------- system health log
@@ -2291,28 +2482,37 @@ def make_handler(state: State, on_quit):
                 if not g:
                     return self._json({"error": "unknown game"}, 404)
                 return self._json({"ok": True, "status": game_shortcut_status(g["runner"], g["app_name"])})
-            if path in ("/api/install-options", "/api/install-start"):
+            if path in ("/api/install-start", "/api/uninstall-start"):   # into the queue
+                g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
+                if not g:
+                    return self._json({"error": "unknown game"}, 404)
+                if path == "/api/install-start":
+                    o = body.get("options") or {}
+                    if not isinstance(o, dict) or not isinstance(o.get("path"), str) or not o["path"].startswith("/"):
+                        return self._json({"ok": False, "error": "bad-path"})
+                    r = state.ops.add("install", g, o)
+                else:
+                    r = state.ops.add("uninstall", g, {"removePrefix": body.get("removePrefix") is True,
+                                                       "removeSettings": body.get("removeSettings") is True})
+                state.mark_busy()
+                return self._json({"ok": "error" not in r, "result": "queued", **r})
+            if path == "/api/queue-cancel":
+                return self._json({"ok": state.ops.cancel(str(body.get("id", "")))})
+            if path == "/api/install-options":
                 g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
                 if not g:
                     return self._json({"error": "unknown game"}, 404)
                 try:
-                    if path == "/api/install-options":
-                        r = install_options(g["runner"], g["app_name"], body.get("platform"), state.heroic)
-                    else:
-                        r = install_with_options(g["runner"], g["app_name"], body.get("options") or {}, state.heroic)
+                    r = install_options(g["runner"], g["app_name"], body.get("platform"), state.heroic)
                 except OSError as e:
                     return self._json({"error": str(e)}, 500)
                 return self._json({"ok": "error" not in r, **r})
-            if path in ("/api/uninstall-options", "/api/uninstall-start"):
+            if path == "/api/uninstall-options":
                 g = next((g for g in state.games if g["id"] == body.get("id", "")), None)
                 if not g:
                     return self._json({"error": "unknown game"}, 404)
                 try:
-                    if path == "/api/uninstall-options":
-                        r = uninstall_options(g["runner"], g["app_name"], state.heroic)
-                    else:
-                        r = start_uninstall(g["runner"], g["app_name"], body.get("removePrefix") is True,
-                                            body.get("removeSettings") is True, state.heroic)
+                    r = uninstall_options(g["runner"], g["app_name"], state.heroic)
                 except OSError as e:
                     return self._json({"error": str(e)}, 500)
                 return self._json({"ok": "error" not in r, **r})
@@ -2339,7 +2539,8 @@ def make_handler(state: State, on_quit):
                 return self._json({"ok": True, "videos": state.videos_for(body.get("id", ""))})
             if path == "/api/downloads":
                 d = heroic_downloads(state.heroic)
-                if d.get("queue") or d.get("uninstalling"):
+                d["jobs"] = state.ops.view()
+                if d.get("queue") or d.get("uninstalling") or state.ops.pending():
                     state.mark_busy()
                 return self._json(d)
             if path in ("/api/launch", "/api/install"):
@@ -2356,6 +2557,8 @@ def make_handler(state: State, on_quit):
                     return self._json({"ok": True})
                 if path == "/api/install":   # installs go through /api/install-options + /api/install-start
                     return self._json({"error": "use /api/install-options"}, 400)
+                if state.ops.pending():   # launching closes our Heroic, which would stop the queue
+                    return self._json({"ok": False, "error": "heroic-busy"})
                 try:
                     r = launch_game(g["runner"], g["app_name"], state.heroic)
                 except OSError as e:
@@ -2472,6 +2675,7 @@ def main():
             f"via Steam {bool(os.environ.get('SteamGameId'))}, IGDB key {bool(twitch_credentials())})")
         state = State(args.heroic_dir)
         HealthMonitor(LOG_DIR / "health.log", busy=lambda: time.time() < state.busy_until).start()
+        state.ops.start()
         if args.no_sync:
             state.reload_library()
             state.set_progress("done")
