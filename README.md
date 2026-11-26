@@ -12,6 +12,15 @@ Browse your Heroic Games Launcher library (Epic, GOG and Amazon games, plus side
 - **Launch** installed games straight from the list, through Steam, so a game keeps running when you close this app.
 - **Self-contained:** the app runs in its own window and brings its own Python, so it doesn't need a browser or the system Python. Everything, including your cache, lives in this folder.
 
+![The game list sorted by rating, with a trailer playing in the details pane](docs/screenshots/main.png)
+
+| | |
+| --- | --- |
+| ![Filtering by genre](docs/screenshots/genres.png) | ![Searching with the on-screen keyboard](docs/screenshots/search.png) |
+| **B**: filter by genre | **Y**: search with the on-screen keyboard |
+| ![Settings](docs/screenshots/settings.png) | |
+| **Menu → Settings…**: update checks, IGDB key | |
+
 ## Set up (once)
 
 ```bash
@@ -71,7 +80,7 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 | LT / RT | Page up / down; **hold** for half a second to jump to the top / bottom |
 | Right stick | Up/down: scroll the details pane · ◀ ▶: previous/next video |
 | Right stick click (R3) | Trailer sound on/off |
-| Menu (three lines) | Store filter, installed only, hide unrated, play style, perspective, Steam match, match unmatched games, settings, uninstall, refresh, quit |
+| Menu (three lines) | Grouped: the selected game (Steam match, uninstall), filters (store, installed only, hide unrated, play style, perspective), ratings (match unmatched games, refresh), app (settings, about, quit) |
 
 **Desktop Mode:** Steam's Desktop controller layout turns the buttons into keys, and the app maps them: A = Enter, View = Tab, Y = Space, LB / RB = Ctrl / Alt. But B and Menu both send Escape (the app treats it as Menu), and X opens Steam's on-screen keyboard, which takes focus away from the app. For full controller support, **hold the Menu (three lines) button for a second** to switch Steam to its Gamepad layout, or launch the app through Steam as a Non-Steam Game. On a Deck in Desktop Mode, the app shows a warning bar about this until it sees a real gamepad button. 
 
@@ -141,6 +150,8 @@ The download and install size update as you change things. **Install** is blocke
 
 Installs and uninstalls go into the app's own queue and run **one at a time**: each starts only when the previous one has finished (an install when its download is done, an uninstall when the game is gone). You can queue several, mixing installs and uninstalls; each game's row shows its place (*Queued #2*, *Uninstall queued #3*), and **Menu → Cancel queued …** takes a waiting one out again. A job that fails shows a message with the reason and doesn't hold up the rest. Launching a game waits until the queue is empty, because it closes the background Heroic the queue runs in.
 
+The queue is saved (`queue.json` in the data folder), so quitting the app, or a crash, doesn't lose it: next time the app starts it says *Resuming N queued jobs* and carries on where it stopped. A download Heroic had already started is picked up rather than started again, and an uninstall of a game that's already gone counts as done.
+
 ## Uninstalling games
 
 Choose **Menu → Uninstall "…"** with an installed game selected. You get the same choices as Heroic's own uninstall dialog, both off by default:
@@ -149,6 +160,18 @@ Choose **Menu → Uninstall "…"** with an installed game selected. You get the
 - **Erase settings and log**: forgets the game's Heroic settings and deletes its log.
 
 Heroic does the uninstall; the game's row shows "Uninstalling…" until it's done.
+
+## Heroic versions
+
+Everything that depends on Heroic's version lives in an *adapter* in [`hr/heroic/`](hr/heroic/): which files hold the library, the format of Heroic's launch links (used to find each game's Steam shortcut), and the functions in Heroic's window that installing, uninstalling and progress use. The rest of the app only sees the plain shapes described in [`hr/heroic/base.py`](hr/heroic/base.py).
+
+At start-up the app reads the installed Heroic's version from its `app.asar` (without starting Heroic) and picks the adapter for it. Supported now: **Heroic 2.x** (tested with 2.22.4).
+
+- **Menu → About…** shows the Heroic version and whether it's supported.
+- **A Heroic version with no adapter yet** (for example the coming Heroic 3.0): a bar under the header says so. Browsing, ratings and launching games through Steam still work (the 2.x adapter reads the library as best it can); installing and uninstalling are turned off, so nothing gets half-done. `HEROIC_RATINGS_ALLOW_UNSUPPORTED=1` turns them on anyway, for trying out a new Heroic.
+- **A Heroic update that renames or removes something the adapter calls:** before its first job in each Heroic run, the app checks that every function it needs is still there. If not, installing and uninstalling are turned off with the list of what's missing, instead of failing halfway.
+
+Adding a new Heroic version: copy `v2.py` to e.g. `v3.py` (or subclass `Heroic2` if most still works), change what's different, add it to `ADAPTERS` in `version.py`, and add a stand-in of that Heroic's window to `tests/fixtures/` plus a line in `tests/test_heroic.py`; the same contract tests then run against it. `HEROIC_RATINGS_HEROIC_VERSION` overrides the detected version.
 
 ## When Heroic is already open
 
@@ -186,6 +209,18 @@ python3 heroic_ratings.py [--port 8787] [--heroic-dir PATH] [--kiosk] [--no-sync
 
 The app finds the Heroic folder automatically for both the Flatpak install (`~/.var/app/com.heroicgameslauncher.hgl/config/heroic`) and the native one (`~/.config/heroic`).
 
+## Security
+
+The app's backend listens only on `127.0.0.1` and only answers its own page: each run gets a random token (passed from the app window), requests must name the server as `127.0.0.1`/`localhost` (which blocks DNS rebinding), must not come from another website, and API posts must be JSON. So other websites open on the Deck can't use it to install, uninstall or change settings. The Twitch secret is stored readable only by you and never shown or logged.
+
+## Updates
+
+Once a day the app asks GitHub for the latest release (`api.github.com/repos/domb84/heroic-ratings/releases/latest`; nothing about you or your library is sent). If it's newer than the version you're running, the header shows *Update v… available*. Turn the check off in Settings (*Check for updates*). Builds that aren't from a release tag (running from a git checkout with no tags) never check.
+
+**Updating with one button:** when the app runs as the AppImage, **Menu → Update to v…** downloads the new AppImage from the release, checks it against the release's `.sha256` file and only then replaces the AppImage file in place (same name and folder, so the Steam shortcut keeps working). You keep using the app while it downloads; the header shows the progress. When it's done the app asks you to quit and start it again. A failed or damaged download leaves the current version untouched. Downloads are only accepted from this repository's GitHub releases. Your data folder (library cache, settings, queue) isn't touched.
+
+Running from a git checkout instead, Settings says where to download the new version.
+
 ## Logs
 
 The app writes three logs to `logs/` in its data folder (`~/.local/share/heroic-ratings/logs/` for the AppImage, `data/logs/` otherwise):
@@ -210,6 +245,10 @@ git push origin v1.0.0
 
 It can also be started by hand from the repository's **Actions** tab (*Release → Run workflow*, with a tag name); that makes a **draft** release, to check before publishing.
 
+## Before a release
+
+Work through [docs/device-checklist.md](docs/device-checklist.md) on a Steam Deck: the parts the automated tests can't reach (Game Mode, Steam, the real Heroic and controller).
+
 ## Tests
 
 ```bash
@@ -222,5 +261,9 @@ This runs the matching, client, sync, API and logging tests against a throwaway 
 python3 -m venv data/.test/venv && data/.test/venv/bin/pip install playwright coverage
 PLAYWRIGHT_BROWSERS_PATH=data/.test/pw data/.test/venv/bin/playwright install chromium-headless-shell
 PLAYWRIGHT_BROWSERS_PATH=data/.test/pw data/.test/venv/bin/python -m unittest discover tests
-data/.test/venv/bin/python -m coverage run --include=heroic_ratings.py -m unittest discover tests && data/.test/venv/bin/python -m coverage report
+data/.test/venv/bin/python -m coverage run --include="hr/*" -m unittest discover tests && data/.test/venv/bin/python -m coverage report
 ```
+
+## Licence
+
+Heroic Ratings is under the [MIT licence](LICENSE). The AppImage bundles Electron (Chromium), Python and hls.js under their own licences; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which also lists the data sources (Steam, Wikidata, IGDB.com, YouTube). Game data from IGDB comes from [IGDB.com](https://www.igdb.com/). This project isn't affiliated with Valve, Epic Games, GOG, Amazon, Twitch/IGDB, Wikimedia, YouTube or the Heroic Games Launcher project.

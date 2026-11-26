@@ -29,7 +29,7 @@ jobs:
           python -m playwright install --with-deps chromium-headless-shell
 
       - name: Run tests
-        run: python -m coverage run --include=heroic_ratings.py -m unittest discover -v tests
+        run: python -m coverage run --include="hr/*" -m unittest discover -v tests
 
       - name: Coverage
         run: python -m coverage report | tail -1 >> "$GITHUB_STEP_SUMMARY"

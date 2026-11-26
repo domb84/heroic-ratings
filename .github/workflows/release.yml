@@ -42,16 +42,20 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]] || { echo "Tag '$TAG' isn't like v1.2.3"; exit 1; }
 
       # Electron, Python and appimagetool are downloaded (and checksum-verified) by the build
-      # scripts; cache them so a release doesn't fetch ~150 MB every time.
-      - name: Cache downloaded runtimes
+      # scripts; cache the unpacked runtimes so a release doesn't fetch ~150 MB every time
+      # (setup.sh skips the download when runtime/ already holds the pinned versions).
+      - name: Cache runtimes
         uses: actions/cache@v4
         with:
           path: |
-            runtime/.downloads
+            runtime/electron
+            runtime/python
             build/appimagetool-*
           key: runtimes-${{ hashFiles('setup.sh', 'build-appimage.sh') }}
 
       - name: Build the AppImage
+        env:
+          HEROIC_RATINGS_VERSION: ${{ env.TAG }}
         run: ./build-appimage.sh
 
       - name: Name it after the version

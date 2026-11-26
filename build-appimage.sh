@@ -31,7 +31,10 @@ echo "$APPIMAGETOOL_SHA256  $TOOL" | sha256sum -c --quiet - || { echo "appimaget
 chmod +x "$TOOL"
 
 # ---- app files
-cp -a heroic_ratings.py web electron runtime "$APPDIR/"
+cp -a heroic_ratings.py hr web electron runtime LICENSE THIRD_PARTY_NOTICES.md "$APPDIR/"
+# The version shown in the app: the release tag in CI, otherwise from git (e.g. v1.0.0-3-g5f2360f).
+VERSION="${HEROIC_RATINGS_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
+echo "$VERSION" > "$APPDIR/VERSION"
 rm -rf "$APPDIR/runtime/.downloads"
 find "$APPDIR" -name __pycache__ -type d -prune -exec rm -rf {} +
 [ -s web/icon.png ] || python3 tools/make_icon.py web/icon.png

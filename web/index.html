@@ -16,6 +16,7 @@
     <input id="search" type="search" placeholder="Search… (Y)" autocomplete="off" spellcheck="false">
   </div>
   <div class="count" id="count"></div>
+  <div class="update-chip" id="updateChip" hidden></div>
   <div class="battery" id="battery" hidden><span class="bicon"><i id="batteryFill"></i></span><span id="batteryText"></span></div>
 </header>
 
@@ -23,6 +24,7 @@
   <b>Steam is using its Desktop controls</b>, so X and B won't work here.
   Hold <span class="btn glyph"><svg viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h10M3 11.5h10"/></svg></span> for 1 second to switch to Gamepad controls.
 </div>
+<div id="heroicWarn" class="warnbar" hidden></div>
 <div id="progress" hidden><div class="bar"><i id="progressBar"></i></div><span id="progressText"></span></div>
 
 <main>
@@ -55,6 +57,15 @@
 </div>
 <div id="toast" hidden></div>
 
-<script src="app.js"></script>
+<script src="js/core.js"></script>
+<script src="js/list.js"></script>
+<script src="js/details.js"></script>
+<script src="js/data.js"></script>
+<script src="js/menus.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/actions.js"></script>
+<script src="js/keyboard.js"></script>
+<script src="js/input.js"></script>
+<script src="js/boot.js"></script>
 </body>
 </html>

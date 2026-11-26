@@ -1,17 +1,18 @@
 import json, os, sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import heroic_ratings as h
+from hr import (config as cfg, library, matching, steam as steam_api, wikidata,  # noqa: F401
+                igdb as igdb_api, heroic as heroic_ctl, state as app_state)
 
-T = h.MATCH_THRESHOLD
+T = cfg.MATCH_THRESHOLD
 
 
 class Matching(unittest.TestCase):
     def match(self, a, b):
-        self.assertGreaterEqual(h.similarity(a, b), T, f"{a!r} should match {b!r}")
+        self.assertGreaterEqual(matching.similarity(a, b), T, f"{a!r} should match {b!r}")
 
     def nomatch(self, a, b):
-        self.assertLess(h.similarity(a, b), T, f"{a!r} should NOT match {b!r}")
+        self.assertLess(matching.similarity(a, b), T, f"{a!r} should NOT match {b!r}")
 
     def test_editions_and_symbols(self):
         self.match("Batman™ Arkham Knight", "Batman™: Arkham Knight")
@@ -34,24 +35,24 @@ class Matching(unittest.TestCase):
         self.nomatch("Alan Wake 2", "Beat Saber - Monstercat Mixtape 2 - Alan Walker")
 
     def test_queries_have_no_dash_operator(self):
-        for q in h.search_queries("Disco Elysium - The Final Cut"):
+        for q in matching.search_queries("Disco Elysium - The Final Cut"):
             self.assertNotIn(" - ", q)
 
 
 class Fallbacks(unittest.TestCase):
     def test_parse_score(self):
-        self.assertEqual(h._parse_score("83/100"), 83)
-        self.assertEqual(h._parse_score("8.6/10"), 86)
-        self.assertIsNone(h._parse_score("86%"))      # OpenCritic "% recommend", not a score
-        self.assertIsNone(h._parse_score(None))
+        self.assertEqual(wikidata._parse_score("83/100"), 83)
+        self.assertEqual(wikidata._parse_score("8.6/10"), 86)
+        self.assertIsNone(wikidata._parse_score("86%"))      # OpenCritic "% recommend", not a score
+        self.assertIsNone(wikidata._parse_score(None))
 
     def test_extras(self):
         for t in ["Football Manager 2024 Pre-game editor", "Football Manager 2022 Resource Archiver",
                   "KillingFloor2Beta", "Chivalry 2 - Public Testing", "Q.U.B.E. 2 Soundtrack",
                   "Galactic Civilizations III (Test branch)", "Death Stranding Content"]:
-            self.assertTrue(h.EXTRA_RE.search(t), t)
+            self.assertTrue(matching.EXTRA_RE.search(t), t)
         for t in ["Football Manager 2024", "Hades", "Alan Wake 2", "Contractor: The Clean Up Part II", "Betrayal"]:
-            self.assertFalse(h.EXTRA_RE.search(t), t)
+            self.assertFalse(matching.EXTRA_RE.search(t), t)
 
 
 class Library(unittest.TestCase):
@@ -66,100 +67,124 @@ class Library(unittest.TestCase):
             (d / "store_cache/gog_library.json").write_text(json.dumps(
                 {"games": [{"app_name": "g1", "title": "Frostpunk", "runner": "gog", "is_installed": True}]}))
             (d / "legendaryConfig/legendary/installed.json").write_text(json.dumps({"a1": {}}))
-            games = {g["id"]: g for g in h.load_library(d)}
+            games = {g["id"]: g for g in library.load_library(d)}
             self.assertEqual(set(games), {"legendary:a1", "gog:g1"})
             self.assertTrue(games["legendary:a1"]["installed"])
             self.assertEqual(games["gog:g1"]["store"], "GOG")
 
+    def test_same_game_twice_in_one_store_is_shown_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "store_cache").mkdir()
+            (d / "legendaryConfig/legendary").mkdir(parents=True)
+            lib = [{"app_name": "a334", "title": "Shadow Tactics Blades of the Shogun", "runner": "legendary"},
+                   {"app_name": "Fangtooth", "title": "Shadow Tactics: Blades of the Shogun", "runner": "legendary",
+                    "art_cover": "x.jpg", "developer": "Mimimi"},
+                   {"app_name": "prey1", "title": "Prey", "runner": "legendary"}]
+            (d / "store_cache/legendary_library.json").write_text(json.dumps({"library": lib}))
+            (d / "store_cache/gog_library.json").write_text(json.dumps({"games": [{"app_name": "9", "title": "Prey", "runner": "gog"}]}))
+            ids = [g["id"] for g in library.load_library(d)]
+            self.assertEqual(ids, ["legendary:prey1", "gog:9", "legendary:Fangtooth"])   # more details wins; Prey kept per store
+            self.assertTrue(all("_quality" not in g for g in library.load_library(d)))
+            # the installed one wins, whatever else
+            (d / "legendaryConfig/legendary/installed.json").write_text(json.dumps({"a334": {}}))
+            self.assertIn("legendary:a334", [g["id"] for g in library.load_library(d)])
+            # one the store says can't be installed loses
+            lib[0]["installable"] = False
+            lib[1]["art_cover"] = lib[1]["developer"] = None
+            (d / "legendaryConfig/legendary/installed.json").write_text("{}")
+            (d / "store_cache/legendary_library.json").write_text(json.dumps({"library": lib}))
+            self.assertIn("legendary:Fangtooth", [g["id"] for g in library.load_library(d)])
+
     def test_weighted_rating(self):
-        self.assertLess(h.weighted_rating(100, 5), h.weighted_rating(95, 100000))
+        self.assertLess(matching.weighted_rating(100, 5), matching.weighted_rating(95, 100000))
 
     def test_debug_socket_is_local_only(self):
         with self.assertRaises(OSError):
-            h._MiniWebSocket("ws://192.168.1.5:47317/devtools/page/x")
-        self.assertIn("--remote-debugging-address=127.0.0.1", h.HEROIC_DEBUG_ARGS)
-        self.assertIn("--no-gui", h.HEROIC_DEBUG_ARGS)
+            heroic_ctl._MiniWebSocket("ws://192.168.1.5:47317/devtools/page/x")
+        self.assertIn("--remote-debugging-address=127.0.0.1", heroic_ctl.HEROIC_DEBUG_ARGS)
+        self.assertIn("--no-gui", heroic_ctl.HEROIC_DEBUG_ARGS)
 
     def test_game_shortcut_url_parsing(self):
         e = {"exe": "flatpak", "LaunchOptions": 'run com.heroicgameslauncher.hgl --no-gui "heroic://launch?appName=Eel&runner=legendary"'}
-        self.assertEqual(h._shortcut_game(e), ("legendary", "Eel"))
-        self.assertEqual(h._shortcut_game({"exe": "x", "LaunchOptions": "heroic://launch/gog/1207658924"}), ("gog", "1207658924"))
-        self.assertIsNone(h._shortcut_game({"exe": "flatpak", "LaunchOptions": "run com.heroicgameslauncher.hgl"}))
+        self.assertEqual(steam_api._shortcut_game(e), ("legendary", "Eel"))
+        self.assertEqual(steam_api._shortcut_game({"exe": "x", "LaunchOptions": "heroic://launch/gog/1207658924"}), ("gog", "1207658924"))
+        self.assertIsNone(steam_api._shortcut_game({"exe": "flatpak", "LaunchOptions": "run com.heroicgameslauncher.hgl"}))
 
     def test_old_debug_shortcut_removed_and_others_kept(self):
         with tempfile.TemporaryDirectory() as d:
-            cfg = Path(d, "userdata/1/config"); cfg.mkdir(parents=True)
+            conf_dir = Path(d, "userdata/1/config"); conf_dir.mkdir(parents=True)
             game = {"appid": ("int", 123), "AppName": "Trine", "LaunchOptions": '"heroic://launch?appName=Eel&runner=legendary"', "tags": {}}
             old = {"appid": ("int", 456), "appname": "Heroic (Debug)", "LaunchOptions": "run x", "tags": {}}
             other = {"appid": ("int", 789), "AppName": "Other", "LaunchOptions": "", "tags": {"0": "fav"}}
-            original = h.vdf_dump({"shortcuts": {"0": game, "1": old, "2": other}})
-            (cfg / "shortcuts.vdf").write_bytes(original)
-            self.assertEqual(h.vdf_dump(h.vdf_load(original)), original)
-            saved = h.STEAM_USERDATA
-            h.STEAM_USERDATA = [Path(d, "userdata")]
+            original = steam_api.vdf_dump({"shortcuts": {"0": game, "1": old, "2": other}})
+            (conf_dir / "shortcuts.vdf").write_bytes(original)
+            self.assertEqual(steam_api.vdf_dump(steam_api.vdf_load(original)), original)
+            saved = cfg.STEAM_USERDATA
+            cfg.STEAM_USERDATA = [Path(d, "userdata")]
             try:
-                self.assertEqual(len(h.remove_old_debug_shortcut()), 1)
-                self.assertEqual(h.remove_old_debug_shortcut(), [])
-                root = h.vdf_load((cfg / "shortcuts.vdf").read_bytes())
+                self.assertEqual(len(steam_api.remove_old_debug_shortcut()), 1)
+                self.assertEqual(steam_api.remove_old_debug_shortcut(), [])
+                root = steam_api.vdf_load((conf_dir / "shortcuts.vdf").read_bytes())
                 self.assertEqual(root["shortcuts"], {"0": game, "1": other})   # renumbered, rest untouched
-                self.assertEqual(len(list(cfg.glob("*.bak"))), 1)
-                self.assertEqual(h.find_game_shortcut("legendary", "Eel")[0], game)
+                self.assertEqual(len(list(conf_dir.glob("*.bak"))), 1)
+                self.assertEqual(steam_api.find_game_shortcut("legendary", "Eel")[0], game)
             finally:
-                h.STEAM_USERDATA = saved
+                cfg.STEAM_USERDATA = saved
 
     def test_steam_start_time_from_pid_file(self):
         with tempfile.TemporaryDirectory() as d:
-            saved = h.STEAM_PID_FILE
+            saved = cfg.STEAM_PID_FILE
             try:
-                h.STEAM_PID_FILE = Path(d, "steam.pid")
-                h.STEAM_PID_FILE.write_text(str(os.getpid()))        # a process we can see: ourselves
-                t = h.steam_start_time()
+                cfg.STEAM_PID_FILE = Path(d, "steam.pid")
+                cfg.STEAM_PID_FILE.write_text(str(os.getpid()))        # a process we can see: ourselves
+                t = steam_api.steam_start_time()
                 self.assertIsNotNone(t)
-                self.assertLess(abs(t - h._process_start(os.getpid())), 1)
+                self.assertLess(abs(t - steam_api._process_start(os.getpid())), 1)
                 self.assertLessEqual(t, time.time())
-                h.STEAM_PID_FILE.write_text("999999999")             # stale PID: not the running client
-                self.assertNotEqual(h.steam_start_time(), t)
+                cfg.STEAM_PID_FILE.write_text("999999999")             # stale PID: not the running client
+                self.assertNotEqual(steam_api.steam_start_time(), t)
             finally:
-                h.STEAM_PID_FILE = saved
+                cfg.STEAM_PID_FILE = saved
 
     def test_shortcut_added_before_steam_restart_counts_as_loaded(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d, "shortcuts.vdf"); f.write_bytes(b"x")
-            saved = (h.SHORTCUT_STATE_FILE, h.steam_start_time)
-            h.SHORTCUT_STATE_FILE = Path(d, "state.json")
+            saved = (cfg.SHORTCUT_STATE_FILE, steam_api.steam_start_time)
+            cfg.SHORTCUT_STATE_FILE = Path(d, "state.json")
             entry = {"appid": ("int", 3589654731)}
             try:
                 now = time.time()
-                h.steam_start_time = lambda: now - 600            # Steam started 10 min ago, file newer
-                self.assertFalse(h.shortcut_loaded_by_steam(entry, f))   # Trine first seen now: not loaded
-                h.steam_start_time = lambda: now + 150            # Steam restarted after that
-                self.assertTrue(h.shortcut_loaded_by_steam(entry, f))
+                steam_api.steam_start_time = lambda: now - 600            # Steam started 10 min ago, file newer
+                self.assertFalse(steam_api.shortcut_loaded_by_steam(entry, f))   # Trine first seen now: not loaded
+                steam_api.steam_start_time = lambda: now + 150            # Steam restarted after that
+                self.assertTrue(steam_api.shortcut_loaded_by_steam(entry, f))
             finally:
-                h.SHORTCUT_STATE_FILE, h.steam_start_time = saved
+                cfg.SHORTCUT_STATE_FILE, steam_api.steam_start_time = saved
 
     def test_launch_only_through_loaded_shortcut(self):
-        saved = (h.game_shortcut_status, h.find_game_shortcut, h.steam_run, h.stop_our_heroic)
+        saved = (steam_api.game_shortcut_status, steam_api.find_game_shortcut, steam_api.steam_run, heroic_ctl.stop_our_heroic)
         ran = []
-        h.steam_run = ran.append
-        h.stop_our_heroic = lambda d: {}
-        h.find_game_shortcut = lambda r, a: ({"appid": ("int", 5)}, Path("x"))
+        steam_api.steam_run = ran.append
+        heroic_ctl.stop_our_heroic = lambda d: {}
+        steam_api.find_game_shortcut = lambda r, a: ({"appid": ("int", 5)}, Path("x"))
         try:
             for status, expected in [("missing", "no-shortcut"), ("restart", "restart-steam"), ("steam-not-running", "steam-not-running")]:
-                h.game_shortcut_status = lambda r, a, s=status: s
-                self.assertEqual(h.launch_game("legendary", "Eel", None), {"error": expected})
+                steam_api.game_shortcut_status = lambda r, a, s=status: s
+                self.assertEqual(heroic_ctl.launch_game("legendary", "Eel", None), {"error": expected})
             self.assertEqual(ran, [])
-            h.game_shortcut_status = lambda r, a: "ready"
-            self.assertEqual(h.launch_game("legendary", "Eel", None), {"via": "steam-shortcut"})
+            steam_api.game_shortcut_status = lambda r, a: "ready"
+            self.assertEqual(heroic_ctl.launch_game("legendary", "Eel", None), {"via": "steam-shortcut"})
             self.assertEqual(ran, [(5 << 32) | 0x02000000])
-            h.stop_our_heroic = lambda d: {"error": "heroic-busy", "busy": ["legendary:X"]}   # downloading: don't launch
-            self.assertEqual(h.launch_game("legendary", "Eel", None)["error"], "heroic-busy")
+            heroic_ctl.stop_our_heroic = lambda d: {"error": "heroic-busy", "busy": ["legendary:X"]}   # downloading: don't launch
+            self.assertEqual(heroic_ctl.launch_game("legendary", "Eel", None)["error"], "heroic-busy")
             self.assertEqual(len(ran), 1)
         finally:
-            h.game_shortcut_status, h.find_game_shortcut, h.steam_run, h.stop_our_heroic = saved
+            steam_api.game_shortcut_status, steam_api.find_game_shortcut, steam_api.steam_run, heroic_ctl.stop_our_heroic = saved
 
     def test_igdb_steam_lookup_with_old_field_fallback(self):
         import urllib.error
-        igdb = h.IGDB("id", "secret")
+        igdb = igdb_api.IGDB("id", "secret")
         calls = []
         def query(endpoint, body):
             calls.append(body)
@@ -172,7 +197,7 @@ class Library(unittest.TestCase):
         self.assertIn("category = 1", calls[1])
 
     def test_igdb_details_parsing(self):
-        igdb = h.IGDB("id", "secret")
+        igdb = igdb_api.IGDB("id", "secret")
         def query(endpoint, body):
             if endpoint == "games":
                 return [{"id": 77, "name": "Vampire Survivors", "rating": 81.2, "rating_count": 397,
@@ -194,7 +219,7 @@ class Library(unittest.TestCase):
         self.assertTrue(d["cover"].endswith("/abc.jpg"))
 
     def test_critic_score_choice(self):
-        pick = lambda meta, wd, ig: (lambda o: (h.State._pick_critic(o, wd, ig), o)[1])({"metascore": meta, "percent": None})
+        pick = lambda meta, wd, ig: (lambda o: (app_state.State._pick_critic(o, wd, ig), o)[1])({"metascore": meta, "percent": None})
         ig = lambda score, n: {"critic": score, "critic_n": n}
         # IGDB wins when solid and Wikidata doesn't have more reviews
         o = pick(None, {"score": 80, "by": "OpenCritic", "n": 4}, ig(85, 7))
@@ -213,16 +238,16 @@ class Library(unittest.TestCase):
 
     def test_wikidata_review_count(self):
         claim = {"qualifiers": {"P7887": [{"datavalue": {"value": {"amount": "+33", "unit": "1"}}}]}}
-        self.assertEqual(h._wd_review_count(claim), 33)
-        self.assertIsNone(h._wd_review_count({"qualifiers": {}}))
+        self.assertEqual(wikidata._wd_review_count(claim), 33)
+        self.assertIsNone(wikidata._wd_review_count({"qualifiers": {}}))
 
     def test_igdb_videos_are_validated_youtube_ids(self):
-        vs = h._igdb_videos([{"name": "Gameplay video", "video_id": "Yg9w4jRHX8A"},
+        vs = igdb_api._igdb_videos([{"name": "Gameplay video", "video_id": "Yg9w4jRHX8A"},
                              {"name": "Trailer", "video_id": "bad id\"><script>"}, {"video_id": "WNNHAHZgKkU"}, "junk"])
         self.assertEqual(vs, [{"name": "Gameplay video", "id": "Yg9w4jRHX8A"}, {"name": "Video", "id": "WNNHAHZgKkU"}])
 
     def test_desktop_layout_detection(self):
-        f = h.desktop_layout_likely
+        f = cfg.desktop_layout_likely
         self.assertTrue(f({"XDG_CURRENT_DESKTOP": "KDE"}, deck=True))       # Desktop Mode, started directly
         self.assertFalse(f({"XDG_CURRENT_DESKTOP": "KDE", "SteamGameId": "123"}, deck=True))  # started via Steam
         self.assertFalse(f({"XDG_CURRENT_DESKTOP": "gamescope"}, deck=True))  # Game Mode

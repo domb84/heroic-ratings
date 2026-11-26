@@ -63,12 +63,12 @@ header {
   padding: 0.3rem 1rem; background: #122233; font-size: 0.85rem; color: var(--mute);
 }
 #progress[hidden] { display: none; }
-#layoutWarn {
+#layoutWarn, .warnbar {
   padding: 0.4rem 1rem; line-height: 1.6; background: #3a2a0c; color: #ffd27a; font-size: 0.9rem;
   border-bottom: 1px solid #6b4d14;
 }
-#layoutWarn[hidden] { display: none; }
-#layoutWarn b { color: #ffe3a8; }
+#layoutWarn[hidden], .warnbar[hidden] { display: none; }
+#layoutWarn b, .warnbar b { color: #ffe3a8; }
 #layoutWarn .btn { vertical-align: middle; margin: 0 0.15rem; }
 #progress .bar { width: 12rem; height: 0.4rem; background: var(--line); border-radius: 1rem; overflow: hidden; }
 #progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
@@ -198,6 +198,17 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 
 /* install options + download progress */
 .opt.info { background: transparent; color: var(--mute); }
+/* the main menu: group headings, rows a little tighter so it all fits on the Deck's screen */
+.opt-h { font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--mute); margin: .5rem .2rem .2rem; }
+.opt-h:first-child { margin-top: 0; }
+.modal.menu { max-height: 92vh; }
+.modal.menu .opt { padding-top: .4rem; padding-bottom: .4rem; margin-bottom: .22rem; font-size: 1rem; }
+.opt.loading span:first-child::before {      /* a small spinner while waiting for an answer */
+  content: ""; display: inline-block; width: .9em; height: .9em; margin-right: .6em; vertical-align: -.1em;
+  border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.opt.info.sel { border-color: transparent; background: transparent; }   /* nothing to select */
 .row .sub .dl, #detail .state .dl { color: var(--accent); }
 
 /* how long to beat (only with an IGDB key) */
@@ -306,6 +317,10 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 /* keyboard sits at the bottom so the results it filters stay visible above it */
 #overlay:has(.modal.keyboard) { background: #0006; place-items: end center; padding-bottom: .5rem; }
 .modal.keyboard .kbhelp { color: var(--mute); font-size: .85rem; margin-top: .2rem; }
+
+/* 'update available' in the header (details in Menu → Settings) */
+.update-chip { color: var(--pos); font-size: .85rem; white-space: nowrap; border: 1px solid currentColor; border-radius: 999px; padding: .1rem .6rem; }
+.update-chip[hidden] { display: none; }
 
 /* battery level in the header */
 .battery { display: flex; align-items: center; gap: .35rem; color: var(--mute); font-size: .9rem; white-space: nowrap; }

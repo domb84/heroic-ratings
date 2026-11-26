@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helpers import Sandbox, Server, synced_cache, h
+from helpers import Sandbox, Server, synced_cache, cfg, logs, util, library, matching, steam_api, wikidata, igdb_api, heroic_ctl, ops, health, app_state, server  # noqa: F401
 
 
 class FakeHeroic:
@@ -58,9 +58,9 @@ class FakeHeroic:
         self.finish_after[app] = self.now + 10
         return {"result": "started"}
 
-    def queue_obj(self):
-        return h.OpQueue(run=self.run, status=self.status, is_installed=self.is_installed,
-                         poll_secs=3, sleep=self.sleep, clock=self.clock)
+    def queue_obj(self, path=None):
+        return ops.OpQueue(run=self.run, status=self.status, is_installed=self.is_installed,
+                         poll_secs=3, sleep=self.sleep, clock=self.clock, path=path)
 
 
 def game(app):
@@ -167,9 +167,9 @@ class CdpErrors(unittest.TestCase):
             def send(self, t): pass
             def recv(self): return json.dumps({"id": 1, "error": {"code": -32000, "message": "Execution context was destroyed."}})
             def close(self): pass
-        with mock.patch.object(h, "_MiniWebSocket", FakeWS):
+        with mock.patch.object(heroic_ctl, "_MiniWebSocket", FakeWS):
             with self.assertRaisesRegex(RuntimeError, "context was destroyed"):
-                h._cdp_eval("ws://127.0.0.1:1/x", "1")
+                heroic_ctl._cdp_eval("ws://127.0.0.1:1/x", "1")
 
     def test_interrupted_scripts_are_retried(self):
         calls = []
@@ -178,12 +178,12 @@ class CdpErrors(unittest.TestCase):
             if len(calls) < 2:
                 raise RuntimeError("Execution context was destroyed.")
             return 42
-        with mock.patch.object(h, "ensure_debug_heroic", lambda d: {"ws": "ws://x"}), \
-                mock.patch.object(h, "_cdp_eval", cdp), mock.patch.object(h.time, "sleep", lambda s: None):
-            self.assertEqual(h.heroic_eval(None, "1", 5, "test"), {"value": 42})
+        with mock.patch.object(heroic_ctl, "ensure_debug_heroic", lambda d: {"ws": "ws://x"}), \
+                mock.patch.object(heroic_ctl, "_cdp_eval", cdp), mock.patch.object(time, "sleep", lambda s: None):
+            self.assertEqual(heroic_ctl.heroic_eval(None, "1", 5, "test"), {"value": 42})
             calls.clear()
-            with mock.patch.object(h, "_cdp_eval", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))):
-                self.assertEqual(h.heroic_eval(None, "1", 5, "test"), {"error": "script", "detail": "nope"})
+            with mock.patch.object(heroic_ctl, "_cdp_eval", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))):
+                self.assertEqual(heroic_ctl.heroic_eval(None, "1", 5, "test"), {"error": "script", "detail": "nope"})
 
 
 def headless_chrome():
@@ -221,12 +221,71 @@ class StartupRace(unittest.TestCase):
 
     def test_first_request_waits_for_the_ui_instead_of_failing(self):
         deadline = time.time() + 10
-        while not h._active_debug_port(self.profile) and time.time() < deadline:
+        while not heroic_ctl._active_debug_port(self.profile) and time.time() < deadline:
             time.sleep(0.1)
         # straight away, while the page is still the start page
-        with mock.patch.object(h, "heroic_running", lambda: True):
-            r = h.heroic_eval(self.profile, "window.api.ping()", 10, "test")
+        with mock.patch.object(heroic_ctl, "heroic_running", lambda: True):
+            r = heroic_ctl.heroic_eval(self.profile, "window.api.ping()", 10, "test")
         self.assertEqual(r, {"value": "pong"})
+
+
+class SavedQueue(unittest.TestCase):
+    """The queue survives quitting the app (or a crash) and carries on next time."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name, "queue.json")
+        self.f = FakeHeroic()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_waiting_and_running_jobs_come_back_in_order(self):
+        q = self.f.queue_obj(self.path)
+        q.add("install", game("a"), {"path": "/games"})
+        q.add("uninstall", game("old"), {"removePrefix": True})
+        q.add("install", game("c"), {})
+        q.cancel("legendary:c")
+        with q.lock:
+            q.jobs[0]["state"] = "running"     # quit mid-download
+        q2 = self.f.queue_obj(self.path)
+        self.assertEqual(q2.resumed, 2)
+        self.assertEqual([(j["kind"], j["gid"], j["state"], j["params"]) for j in q2.jobs],
+                         [("install", "legendary:a", "queued", {"path": "/games"}),
+                          ("uninstall", "legendary:old", "queued", {"removePrefix": True})])
+        while q2.step():
+            pass
+        self.assertEqual([j["state"] for j in q2.view()], ["done", "done"])
+        self.assertEqual(json.loads(self.path.read_text()), [], "finished jobs aren't resumed again")
+        self.assertEqual(self.f.queue_obj(self.path).resumed, 0)
+
+    def test_a_job_heroic_already_has_is_followed_not_repeated(self):
+        q = self.f.queue_obj(self.path)
+        q.add("install", game("a"), {})
+        self.f.queue.append("a")                       # Heroic kept downloading while the app was closed
+        self.f.finish_after["a"] = 20
+        self.f.run = lambda job: {"result": "queued"}  # what the install script answers for a queued game
+        q2 = self.f.queue_obj(self.path)
+        q2.step()
+        self.assertEqual(q2.view()[0]["state"], "done")
+        self.assertEqual(self.f.queue, [])
+
+    def test_damaged_files_are_ignored(self):
+        for bad in ("not json", '{"a": 1}', '[1, {"kind": "format"}, {"kind": "install"}]'):
+            self.path.write_text(bad)
+            self.assertEqual(self.f.queue_obj(self.path).jobs, [])
+
+    def test_resumed_jobs_wait_for_the_library(self):
+        q = self.f.queue_obj(self.path)
+        q.add("install", game("a"), {})
+        q2 = self.f.queue_obj(self.path).start()
+        time.sleep(0.2)
+        self.assertEqual(self.f.started, [], "nothing runs before the library is loaded")
+        q2.ready.set()
+        for _ in range(50):
+            if self.f.started:
+                break
+            time.sleep(0.05)
+        self.assertEqual([s[1:] for s in self.f.started], [("install", "legendary:a")])
 
 
 class QueueApi(unittest.TestCase):
@@ -248,7 +307,7 @@ class QueueApi(unittest.TestCase):
         self.assertEqual(self.srv.post("/api/install-start", {"id": "legendary:beta", "options": {"path": "/games"}})[1]["error"],
                          "already-queued")
         self.assertEqual(self.srv.post("/api/install-start", {"id": "legendary:gamma", "options": {"path": "relative"}})[1]["error"], "bad-path")
-        with mock.patch.object(h, "heroic_downloads", lambda d: {"running": False}):
+        with mock.patch.object(heroic_ctl, "heroic_downloads", lambda d: {"running": False}):
             jobs = self.srv.post("/api/downloads")[1]["jobs"]
         self.assertEqual([(j["id"], j["kind"], j["position"]) for j in jobs],
                          [("legendary:beta", "install", 1), ("legendary:alpha", "uninstall", 2)])
@@ -257,6 +316,15 @@ class QueueApi(unittest.TestCase):
                          "no launching while the queue would be cut off")
         self.assertTrue(self.srv.post("/api/queue-cancel", {"id": "legendary:alpha"})[1]["ok"])
         self.assertEqual(self.st.ops.pending(), 1)
+        # quitting now and starting again: the install is still queued, and the page is told
+        st2 = self.sb.state()
+        self.assertEqual([j["gid"] for j in st2.ops.jobs], ["legendary:beta"])
+        srv2 = Server(st2)
+        try:
+            with mock.patch.object(heroic_ctl, "heroic_downloads", lambda d: {"running": False}):
+                self.assertEqual(srv2.post("/api/downloads")[1]["resumed"], 1)
+        finally:
+            srv2.close()
 
 
 if __name__ == "__main__":

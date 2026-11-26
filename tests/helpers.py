@@ -3,6 +3,7 @@
 Nothing here touches the real Heroic/Steam folders or the network.
 """
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -11,7 +12,10 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import heroic_ratings as h  # noqa: E402
+os.environ["HEROIC_RATINGS_HEROIC_VERSION"] = "2.22.4"   # not whatever Heroic this machine has
+# the app's modules, under the same names the app uses for them
+from hr import (config as cfg, logs, util, library, matching, steam as steam_api, wikidata,  # noqa: E402,F401
+                igdb as igdb_api, heroic as heroic_ctl, ops, health, state as app_state, server)
 
 # Three games and one editor. Alpha is installed and has full Steam + IGDB data,
 # Beta has Steam data, Gamma isn't on Steam (critic score from Wikidata).
@@ -93,26 +97,26 @@ class Sandbox:
         (self.heroic / "store_cache/legendary_library.json").write_text(json.dumps({"library": LIBRARY}))
         self.installed_file = self.heroic / "legendaryConfig/legendary/installed.json"
         self.installed_file.write_text(json.dumps({"alpha": {}}))
-        self.saved = {k: getattr(h, k) for k in self.PATCH}
-        h.DATA_DIR = self.data
-        h.CACHE_FILE = self.data / "cache.json"
-        h.OVERRIDES_FILE = self.data / "overrides.json"
-        h.SHORTCUT_STATE_FILE = self.data / "steam-shortcut.json"
-        h.LOG_DIR = self.data / "logs"
-        h.STEAM_USERDATA = [root / "steam/userdata"]
+        self.saved = {k: getattr(cfg, k) for k in self.PATCH}
+        cfg.DATA_DIR = self.data
+        cfg.CACHE_FILE = self.data / "cache.json"
+        cfg.OVERRIDES_FILE = self.data / "overrides.json"
+        cfg.SHORTCUT_STATE_FILE = self.data / "steam-shortcut.json"
+        cfg.LOG_DIR = self.data / "logs"
+        cfg.STEAM_USERDATA = [root / "steam/userdata"]
         if self.cache is not None:
-            h.CACHE_FILE.write_text(json.dumps(self.cache))
+            cfg.CACHE_FILE.write_text(json.dumps(self.cache))
         return self
 
-    def state(self, fake=True) -> "h.State":
-        st = h.State(str(self.heroic))
+    def state(self, fake=True) -> "app_state.State":
+        st = app_state.State(str(self.heroic))
         if fake:
             st.steam, st.wikidata = FakeSteam(), FakeWikidata()
         return st
 
     def __exit__(self, *exc):
         for k, v in self.saved.items():
-            setattr(h, k, v)
+            setattr(cfg, k, v)
         self.tmp.cleanup()
 
 
@@ -125,28 +129,32 @@ def synced_cache() -> dict:
 
 
 class Server:
-    """The app's real HTTP server on a free port, for a given State."""
-    def __init__(self, state):
+    """The app's real HTTP server on a free port, for a given State (and optional token,
+    which get/post then send like the app's page does)."""
+    def __init__(self, state, token: str | None = None):
         self.quit_called = threading.Event()
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), h.make_handler(state, self.quit_called.set))
+        self.token = token
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(state, self.quit_called.set, token))
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
-    def get(self, path):
+    def request(self, path, method="GET", data: bytes | None = None, headers: dict | None = None):
+        hdrs = {"X-Heroic-Ratings-Token": self.token} if self.token else {}
+        hdrs.update(headers or {})
+        req = urllib.request.Request(self.url + path, data=data, method=method, headers=hdrs)
         try:
-            with urllib.request.urlopen(self.url + path, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()
 
-    def post(self, path, body=None, raw: bytes | None = None):
+    def get(self, path, headers=None):
+        return self.request(path, headers=headers)
+
+    def post(self, path, body=None, raw: bytes | None = None, headers=None):
         data = raw if raw is not None else json.dumps(body or {}).encode()
-        req = urllib.request.Request(self.url + path, data=data, method="POST", headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, json.loads(r.read() or b"{}")
-        except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read() or b"{}")
+        code, out = self.request(path, "POST", data, {"Content-Type": "application/json", **(headers or {})})
+        return code, json.loads(out or b"{}")
 
     def close(self):
         self.httpd.shutdown()

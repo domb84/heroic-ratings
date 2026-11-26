@@ -14,7 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
-from helpers import Sandbox, Server, synced_cache, h
+from helpers import Sandbox, Server, synced_cache, cfg, logs, util, library, matching, steam_api, wikidata, igdb_api, heroic_ctl, ops, health, app_state, server  # noqa: F401
 
 ROOT = Path(__file__).resolve().parent.parent
 if (ROOT / "data/.test/pw").is_dir():   # the local test setup; elsewhere (CI) Playwright's default location
@@ -44,13 +44,13 @@ class Interface(unittest.TestCase):
         cls.state.reload_library()
         cls.state.set_progress("done")
         cls.srv = Server(cls.state)
-        cls.logfile = h.setup_logging(h.LOG_DIR)
+        cls.logfile = logs.setup_logging(cfg.LOG_DIR)
 
     @classmethod
     def tearDownClass(cls):
         cls.srv.close()
-        for hd in [hd for hd in h.logger.handlers if isinstance(hd, logging.FileHandler)]:
-            h.logger.removeHandler(hd)
+        for hd in [hd for hd in logs.logger.handlers if isinstance(hd, logging.FileHandler)]:
+            logs.logger.removeHandler(hd)
             hd.close()
         cls.sb.__exit__(None, None, None)
 
@@ -104,7 +104,7 @@ class Interface(unittest.TestCase):
         labels = self.ev("S.modal.items().map(i => i.label)")
         for want in ("Installed only", "Settings…", "Quit"):
             self.assertIn(want, labels)
-        for gone in ("Sort by", "Order", "Trailer sound", "Controller test", "Search…"):
+        for gone in ("Sort by", "Order", "Trailer sound", "Controller test", "Search…", "Re-fetch all ratings"):
             self.assertNotIn(gone, labels)
         self.ev("input('b')")
         self.assertFalse(self.ev("!!S.modal"))
@@ -118,8 +118,8 @@ class Interface(unittest.TestCase):
         self.ev("S.steamDeck = false; input('start')")
         self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Settings…'); input('a')")
         self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
-        status = lambda: self.ev("S.modal.items().find(i => i.label === 'Status').value")
-        self.assertEqual(status(), "Not set")
+        labels = lambda: self.ev("S.modal.items().map(i => i.label)")
+        self.assertNotIn("Test IGDB connection", labels(), "nothing to test without a key")
         for label, value in [("Twitch client ID", "abcdefghij0123456789"), ("Twitch client secret", "s3cr3tvalue0123456789xyz")]:
             self.ev(f"S.modal.sel = S.modal.items().findIndex(i => i.label === {label!r}); input('a')")
             self.page.wait_for_selector("#promptInput:focus")
@@ -127,15 +127,16 @@ class Interface(unittest.TestCase):
             self.page.keyboard.press("Enter")
             self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
         self.assertEqual(self.ev("S.modal.items().find(i => i.label === 'Twitch client secret').value"), "•" * 10 + " (new)")
-        with mock.patch.object(h.IGDB, "_get_token", lambda self_: None):
+        with mock.patch.object(igdb_api.IGDB, "_get_token", lambda self_: None):
             self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Save and check with Twitch'); input('a')")
             self.page.wait_for_function("!S.modal")
         self.ev("openSettings()")
         self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
-        self.assertEqual(status(), "Connected · abcd…789")
+        self.assertEqual(self.ev("S.modal.items().find(i => i.label === 'Twitch client ID').value"), "abcd…789")
+        self.assertIn("Test IGDB connection", labels())
         self.assertNotIn("s3cr3t", self.page.content())
         self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Remove credentials'); input('a')")
-        self.page.wait_for_function("S.modal && S.modal.items().find(i => i.label === 'Status').value === 'Not set'")
+        self.page.wait_for_function("S.modal && S.modal.items().find(i => i.label === 'Twitch client ID').value === 'Not set'")
 
     def test_y_searches_with_the_on_screen_keyboard_on_a_deck(self):
         self.ev("S.steamDeck = true; input('y')")
@@ -189,10 +190,10 @@ class Interface(unittest.TestCase):
         self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Alpha Quest'); input('a')")
         self.page.wait_for_function("!S.modal")
         deadline = time.time() + 5
-        while not h.OVERRIDES_FILE.exists() and time.time() < deadline:
+        while not cfg.OVERRIDES_FILE.exists() and time.time() < deadline:
             time.sleep(0.1)
-        self.assertEqual(json.loads(h.OVERRIDES_FILE.read_text())["legendary:gamma"], 100)
-        h.OVERRIDES_FILE.unlink()
+        self.assertEqual(json.loads(cfg.OVERRIDES_FILE.read_text())["legendary:gamma"], 100)
+        cfg.OVERRIDES_FILE.unlink()
 
     def test_trailer_keeps_playing_when_the_list_reloads(self):
         self.ev("select(S.view.findIndex(g => g.title === 'Alpha Quest'), true)")
@@ -204,6 +205,31 @@ class Interface(unittest.TestCase):
                         "same video element, not restarted")
         self.ev("select(S.view.findIndex(g => g.title === 'Bravo Racer'), true)")
         self.assertFalse(self.ev("document.contains(window.__v)"), "another game: its own trailer")
+
+    def test_match_search_shows_it_is_searching_and_can_be_cancelled(self):
+        held = []                                          # searches waiting for an answer
+        self.page.route("**/api/match-search", lambda route: held.append(route))
+        answer = {"ok": True, "results": [{"appid": 4242, "name": "Gamma Online", "year": 2021, "src": "steam"}]}
+        g = "S.games.find(x => x.title === 'Gamma Online')"
+        self.ev(f"void matchResults({g}, 'gamma')")
+        self.assertEqual(self.ev("S.modal.title"), "Steam match for Gamma Online", "the window opens straight away")
+        self.assertIn("Searching Steam for “gamma”…", self.ev("$('modal').innerText"))
+        self.assertTrue(self.ev("!!document.querySelector('#modal .opt.loading')"))
+        self.page.wait_for_timeout(200)                    # let the request reach the route
+        held.pop().fulfill(json=answer)
+        self.page.wait_for_function("S.modal && S.modal.items()[0].label === 'Gamma Online'")
+        self.assertFalse(self.ev("!!document.querySelector('#modal .opt.loading')"))
+        self.assertEqual(self.ev("S.modal.items()[S.modal.sel].label"), "Gamma Online")
+        self.ev("input('b')")
+        # cancelled while searching: the late answer doesn't pop up
+        self.ev(f"void matchResults({g}, 'gamma')")
+        self.ev("input('b')")
+        self.assertFalse(self.ev("!!S.modal"))
+        self.page.wait_for_timeout(200)
+        held.pop().fulfill(json=answer)
+        self.page.wait_for_timeout(500)
+        self.assertFalse(self.ev("!!S.modal"), "stays closed")
+        self.page.unroute("**/api/match-search")
 
     def test_menu_offers_matching_unmatched_games(self):
         self.ev("input('start')")
@@ -277,6 +303,171 @@ class Interface(unittest.TestCase):
         self.assertIn("Cancel queued install of “Gamma Online”", self.ev("S.modal.items().map(i => i.label)"))
         self.ev("input('b')")
         self.page.unroute("**/api/downloads")
+
+    def test_page_uses_the_token_from_its_address(self):
+        srv = Server(self.state, token="page-token-9")
+        try:
+            page = _browser.new_page()
+            page.goto(srv.url + "/#t=page-token-9")
+            page.wait_for_function("S.games.length > 0", timeout=10000)
+            self.assertEqual(page.evaluate("S.games.length"), 4)
+            page.goto(srv.url + "/")                          # without it: no data
+            page.wait_for_timeout(1500)
+            self.assertEqual(page.evaluate("S.games.length"), 0)
+            self.assertIn("can't talk to the app", page.evaluate("document.getElementById('progress').innerText"))
+            page.close()
+        finally:
+            srv.close()
+
+    def test_quit_warns_while_heroic_is_busy(self):
+        self.ev("S.downloads = { 'legendary:beta': { active: true, percent: 40 }, 'legendary:gamma': { queued: true, kind: 'install', pos: 2 } }")
+        self.ev("quit()")
+        self.assertEqual(self.ev("S.modal.kind"), "confirm")
+        text = self.ev("document.getElementById('modal').innerText")
+        self.assertIn("1 install in progress", text)
+        self.assertIn("1 more waiting in the queue", text)
+        self.ev("input('b')")                                     # cancel: still running
+        self.assertFalse(self.ev("!!S.modal"))
+        self.assertFalse(self.srv.quit_called.is_set())
+        self.ev("S.downloads = {}")
+
+    def test_menu_is_grouped_with_the_selected_game_first(self):
+        self.ev("select(S.view.findIndex(g => g.title === 'Alpha Quest'), true); input('start')")
+        items = self.ev("S.modal.items().map(i => (i.heading ? '# ' : '') + i.label)")
+        self.assertEqual([i for i in items if i.startswith("# ")], ["# Selected game", "# Filters", "# Ratings", "# App"])
+        self.assertEqual(items[1:3], ["Steam match for “Alpha Quest”…", "Uninstall “Alpha Quest”"])
+        self.assertEqual(items[items.index("# Ratings") + 1:items.index("# App")], ["Match unmatched games (1)", "Refresh"])
+        self.assertEqual(items[items.index("# App") + 1:], ["Settings…", "About…", "Quit"])
+        sel = lambda: self.ev("S.modal.items()[S.modal.sel].label")
+        self.assertEqual(sel(), "Steam match for “Alpha Quest”…", "starts on the first thing, not a heading")
+        self.ev("input('down'); input('down')")
+        self.assertEqual(sel(), "Store", "headings are skipped")
+        self.ev("input('up')")
+        self.assertEqual(sel(), "Uninstall “Alpha Quest”")
+        self.ev("input('end')")
+        self.assertEqual(sel(), "Quit")
+        self.ev("input('home')")
+        self.assertEqual(sel(), "Steam match for “Alpha Quest”…")
+        self.ev("input('b')")
+
+    def test_about_page_shows_versions_and_goes_back_to_the_menu(self):
+        self.ev("S.steamDeck = false; openSettings()")
+        self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+        labels = self.ev("S.modal.items().map(i => i.label)")
+        for gone in ("Version", "Heroic", "About…", "IGDB.com"):
+            self.assertNotIn(gone, labels)
+        self.ev("closeModal(); input('start')")
+        self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'About…'); input('a')")
+        self.page.wait_for_function("S.modal && S.modal.title === 'About'")
+        about = {i["label"]: i.get("value") for i in self.ev("S.modal.items()")}
+        self.assertEqual(about["Heroic Ratings"], cfg.APP_VERSION)
+        self.assertEqual(about["Heroic"], "2.22.4")
+        self.assertIn("Ratings and details from Steam, Wikidata and IGDB.com", about)
+        self.ev("input('b')")
+        self.page.wait_for_function("S.modal && S.modal.title === 'Menu'")
+        self.ev("closeModal()")
+
+    def test_igdb_test_button_reports_the_result(self):
+        answers = iter([{"ok": True}, {"ok": False, "error": "Twitch didn't accept the client ID and secret (HTTP 400)."}])
+        self.page.route("**/api/settings/twitch-test", lambda route: route.fulfill(json=next(answers)))
+        self.ev("testTwitch()")
+        self.page.wait_for_function("$('toast').textContent === 'IGDB is working'")
+        self.ev("testTwitch()")
+        self.page.wait_for_function("S.modal && S.modal.kind === 'confirm'")
+        self.assertIn("IGDB test failed: Twitch didn't accept", self.ev("$('modal').innerText"))
+        self.ev("closeModal()")
+        self.page.unroute("**/api/settings/twitch-test")
+
+    def test_update_chip_follows_the_download_and_asks_to_restart(self):
+        u = {"version": "v9.0.0", "url": "https://github.com/x/releases/tag/v9.0.0", "size": 140 * 1048576, "can_install": True}
+        self.ev(f"showUpdate({json.dumps({**u, 'install': {}})})")
+        self.assertEqual(self.ev("$('updateChip').textContent"), "Update v9.0.0 available")
+        self.ev("input('start')")
+        item = self.ev("S.modal.items().find(i => i.label === 'Update to v9.0.0')")
+        self.assertEqual(item["value"], "Download and install")
+        self.ev("closeModal()")
+        self.ev(f"showUpdate({json.dumps({**u, 'install': {'phase': 'downloading', 'done': 50, 'total': 200}})})")
+        self.assertEqual(self.ev("$('updateChip').textContent"), "Updating… 25%")
+        self.ev(f"showUpdate({json.dumps({**u, 'install': {'phase': 'done', 'version': 'v9.0.0'}})})")
+        self.assertEqual(self.ev("$('updateChip').textContent"), "Restart to update")
+        self.assertEqual(self.ev("S.modal.kind"), "confirm")
+        self.assertIn("Updated to v9.0.0", self.ev("$('modal').innerText"))
+        self.ev("input('b')")
+        self.ev(f"showUpdate({json.dumps({**u, 'install': {'phase': 'done', 'version': 'v9.0.0'}})})")
+        self.assertFalse(self.ev("!!S.modal"), "asked once, not on every status poll")
+        self.ev("showUpdate(null)")
+        self.assertTrue(self.ev("$('updateChip').hidden"))
+
+    def test_update_button_downloads_after_confirming(self):
+        posted = []
+        self.page.route("**/api/update-install", lambda route: (posted.append(1), route.fulfill(json={"ok": True}))[1])
+        self.ev("updateFlow({version: 'v9.0.0', size: 140 * 1048576, can_install: true, install: {}})")
+        text = self.ev("$('modal').innerText")
+        self.assertIn("Heroic Ratings v9.0.0 (140 MB)", text)
+        self.assertIn("checksum", text)
+        self.assertEqual(posted, [], "nothing happens before A")
+        self.ev("input('a')")
+        self.page.wait_for_function("!$('toast').hidden && $('toast').textContent.startsWith('Downloading v9.0.0')")
+        self.assertEqual(posted, [1])
+        self.page.unroute("**/api/update-install")
+
+    def test_a_failed_update_says_so(self):
+        self.ev("showUpdate({version: 'v9.0.1', can_install: true, install: {phase: 'error', error: 'checksum mismatch'}})")
+        self.assertIn("Update failed: checksum mismatch", self.ev("$('toast').textContent"))
+        self.ev("showUpdate(null)")
+
+    def test_settings_turn_update_checks_off_and_on(self):
+        from hr import updates
+        old = self.state.updates
+        self.state.updates = updates.Updates(cfg.DATA_DIR / "updates-ui.json", current="v1.0.0",
+                                             fetch=lambda: {"latest": "v1.0.0", "url": "u"})
+        try:
+            self.ev("S.steamDeck = false; openSettings()")
+            self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+            row = lambda: self.ev("S.modal.items().find(i => i.label === 'Check for updates')")
+            self.assertEqual(row()["value"], "On")
+            self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Check for updates'); input('a')")
+            self.page.wait_for_function("S.modal && S.modal.items().find(i => i.label === 'Check for updates').value === 'Off'")
+            self.assertFalse(self.state.updates.enabled)
+            self.ev("input('a')")
+            self.page.wait_for_function("S.modal && S.modal.items().find(i => i.label === 'Check for updates').value === 'On'")
+            self.assertTrue(self.state.updates.enabled)
+            self.ev("closeModal()")
+        finally:
+            self.state.updates = old
+
+    def test_resumed_queue_is_announced_once(self):
+        self.page.route("**/api/downloads", lambda route: route.fulfill(json={"running": False, "jobs": [], "resumed": 2}))
+        self.ev("pollDownloads()")
+        self.page.wait_for_function("$('toast').textContent.startsWith('Resuming 2 queued jobs')")
+        self.ev("$('toast').textContent = ''")
+        self.ev("pollDownloads()")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(self.ev("$('toast').textContent"), "")
+        self.page.unroute("**/api/downloads")
+
+    # ------------------------------------------------------------ Heroic support
+    def test_unsupported_heroic_is_explained_up_front(self):
+        self.assertTrue(self.ev("$('heroicWarn').hidden"), "supported Heroic: no warning")
+        self.ev("showHeroicWarn({version: '3.0.0-beta.1', adapter: 'Heroic 2.x', tested: '2.22.4', status: 'unsupported', missing: [], installs: false})")
+        text = self.ev("$('heroicWarn').innerText")
+        self.assertIn("Heroic 3.0.0-beta.1 isn't supported yet", text)
+        self.assertIn("Browsing and launching still work", text)
+        self.ev("showHeroicWarn({version: '2.23.0', adapter: 'Heroic 2.x', status: 'api-changed', missing: ['install'], installs: false})")
+        self.assertIn("Missing: install", self.ev("$('heroicWarn').innerText"))
+        self.ev("showHeroicWarn({version: '2.23.0', status: 'untested', installs: true})")
+        self.assertTrue(self.ev("$('heroicWarn').hidden"), "newer but working: no banner")
+
+    def test_install_on_an_unsupported_heroic_explains_why(self):
+        detail = "Heroic 3.0.0 isn't supported yet (this app works with Heroic 2.x)"
+        self.page.route("**/api/install-options", lambda route: route.fulfill(json={"ok": False, "error": "heroic-unsupported", "detail": detail}))
+        self.ev("select(S.view.findIndex(g => g.title === 'Bravo Racer'), true); launchSelected(); input('a')")
+        self.page.wait_for_function("S.modal && S.modal.kind === 'confirm' && $('modal').innerText.includes('supported')")
+        text = self.ev("$('modal').innerText")
+        self.assertIn(detail, text)
+        self.assertIn("Do it in Heroic itself for now", text)
+        self.ev("input('b')")
+        self.page.unroute("**/api/install-options")
 
     def test_page_errors_reach_the_app_log(self):
         self.ev("setTimeout(() => { throw new Error('ui test boom'); })")

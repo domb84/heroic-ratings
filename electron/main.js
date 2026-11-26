@@ -5,6 +5,7 @@
 "use strict";
 const { app, BrowserWindow, ipcMain } = require("electron");
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const net = require("net");
@@ -16,6 +17,9 @@ const SCREENSHOT = process.env.HEROIC_RATINGS_SCREENSHOT; // test hook: capture 
 const DEFAULT_PORT = Number(process.env.HEROIC_RATINGS_PORT || 8787);
 
 let backend = null;
+// A secret for this run: the backend only answers API calls that carry it (so other
+// programs and websites can't drive the app), and the page gets it in the URL fragment.
+const TOKEN = crypto.randomBytes(24).toString("base64url");
 let win = null;
 let quitting = false;
 
@@ -52,7 +56,7 @@ function caBundle() {
 
 function status(port) {
   return new Promise(resolve => {
-    const req = http.get({ host: "127.0.0.1", port, path: "/api/status", timeout: 1500 }, res => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/api/ping", timeout: 1500 }, res => {
       let body = "";
       res.on("data", c => (body += c));
       res.on("end", () => { try { resolve(JSON.parse(body).app === "heroic-ratings"); } catch { resolve(false); } });
@@ -76,9 +80,9 @@ function anyPort() {
 }
 
 async function startBackend() {
-  if (await status(DEFAULT_PORT)) { log("reusing running backend on", DEFAULT_PORT); return DEFAULT_PORT; }
+  // (A backend left running from an earlier start can't be reused: it has another token.)
   const port = (await portFree(DEFAULT_PORT)) ? DEFAULT_PORT : await anyPort();
-  const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONUNBUFFERED: "1" };
+  const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONUNBUFFERED: "1", HEROIC_RATINGS_TOKEN: TOKEN };
   delete env.ELECTRON_RUN_AS_NODE;
   if (!env.SSL_CERT_FILE && caBundle()) env.SSL_CERT_FILE = caBundle();
   const py = pythonBin();
@@ -170,7 +174,7 @@ async function createWindow() {
   };
   win.on("restore", comeBack);
   win.on("focus", comeBack);
-  await win.loadURL(base);
+  await win.loadURL(`${base}#t=${TOKEN}`);
 
   if (SCREENSHOT) {
     win.setContentSize(1280, 720);
