@@ -4,17 +4,28 @@
 // ---------------------------------------------------------------- settings
 // Twitch/IGDB credentials. The secret never comes back from the backend; values typed
 // here are only sent when saved, after Twitch has accepted them.
-const settingsDraft = { client_id: "", client_secret: "" };
+const settingsDraft = { client_id: "", client_secret: "", steam_key: "" };
 async function openSettings(sel = 0) {
-  let st, upd;
-  try { ({ twitch: st, updates: upd } = await api("/api/settings", {})); } catch { toast("Couldn't load settings", 3000); return; }
+  let st, upd, sk;
+  try { ({ twitch: st, updates: upd, steam_key: sk } = await api("/api/settings", {})); } catch { toast("Couldn't load settings", 3000); return; }
   const fromEnv = st.source === "env";
   const draftSet = settingsDraft.client_id || settingsDraft.client_secret;
   const u = upd.available;
   const items = () => [
+    ...(u || upd.checkable ? [{ heading: true, label: "Updates" }] : []),
     ...(u ? [u.can_install ? { label: `Update to ${u.version}`, value: updateValue(u), activate: () => updateFlow(u) }
                            : { info: true, label: "Update available", value: u.version }] : []),
     ...(upd.checkable ? [{ label: "Check for updates", value: upd.enabled ? "On" : "Off", activate: () => toggleUpdates(!upd.enabled) }] : []),
+    { heading: true, label: "Steam" },
+    ...(sk.source === "env" ? [{ info: true, label: "Steam Web API key", value: "Set by environment" }] : [
+      { label: "Steam Web API key", value: settingsDraft.steam_key ? "•".repeat(10) + " (new)" : sk.set ? sk.hint : "Not set",
+        activate: () => editSetting("steam_key", "Steam Web API key", true) },
+      ...(settingsDraft.steam_key ? [{ label: "Save and check with Steam", activate: saveSteamKey }] : []),
+    ]),
+    ...(sk.set && !settingsDraft.steam_key ? [{ label: "Test Steam key", activate: testSteamKey }] : []),
+    ...(sk.set && sk.source !== "env" && !settingsDraft.steam_key ? [{ label: "Remove Steam key", activate: removeSteamKey }] : []),
+    ...(sk.set ? [] : [{ info: true, label: "Optional: matches your library to Steam in seconds instead of minutes. Free key from steamcommunity.com/dev/apikey." }]),
+    { heading: true, label: "IGDB" },
     ...(fromEnv ? [{ info: true, label: "Twitch key (for IGDB)", value: "Set by environment" }] : []),
     ...(fromEnv ? [] : [
       { label: "Twitch client ID", value: settingsDraft.client_id ? settingsDraft.client_id : st.set ? st.client_id_hint : "Not set",
@@ -27,8 +38,33 @@ async function openSettings(sel = 0) {
     ...(st.set && !draftSet ? [{ label: "Test IGDB connection", activate: testTwitch }] : []),
     ...(st.set || fromEnv ? [] : [{ info: true, label: "Optional: adds critic scores, play times and videos. Free key from dev.twitch.tv/console." }]),
   ];
-  if (!sel) sel = items().findIndex(i => !i.info);   // start on the first thing you can change
+  if (!sel) sel = items().findIndex(i => !i.info && !i.heading);   // start on the first thing you can change
   openModal({ kind: "list settings", title: "Settings", hint: "A select · B close", items, sel });
+}
+// Steam Web API key: checked with Steam before it's saved; never shown again in full.
+async function saveSteamKey() {
+  toast("Checking with Steam…", 2000);
+  let r;
+  try { r = await api("/api/settings/steam-key", { key: settingsDraft.steam_key }); } catch { r = { ok: false, error: "No reply from the app" }; }
+  if (r.ok) {
+    settingsDraft.steam_key = "";
+    closeModal();
+    toast("Steam accepted the key. Matching the rest of your library…", 4000);
+  } else {
+    openModal({ kind: "confirm", yes: "OK", html: esc(r.error), onYes: () => openSettings() });
+  }
+}
+async function testSteamKey() {
+  toast("Testing with Steam…", 3000);
+  let r;
+  try { r = await api("/api/settings/steam-key-test", {}); } catch { r = { ok: false, error: "No reply from the app" }; }
+  if (r.ok) toast("The Steam key is working", 2500);
+  else openModal({ kind: "confirm", yes: "OK", html: `Steam key test failed: ${esc(r.error)}`, onYes: () => openSettings() });
+}
+async function removeSteamKey() {
+  const r = await api("/api/settings/steam-key", { remove: true });
+  if (r.ok) { toast("Steam key removed", 2500); openSettings(); }
+  else openModal({ kind: "confirm", yes: "OK", html: esc(r.error), onYes: () => openSettings() });
 }
 function updateValue(u) {
   const ins = u.install || {};
@@ -58,8 +94,9 @@ async function toggleUpdates(on) {
 }
 function editSetting(key, title, secret) {
   const back = S.modal.sel;
-  askText({ title, secret, value: settingsDraft[key],
-    html: secret ? "Paste or type the secret. It's stored only on this device."
+  askText({ title, secret, compact: true, value: settingsDraft[key],
+    html: key === "steam_key" ? "At steamcommunity.com/dev/apikey: sign in, enter any domain name (e.g. localhost), agree, and copy the key. It's stored only on this device."
+      : secret ? "Paste or type the secret. It's stored only on this device."
       : "At dev.twitch.tv/console: Register Your Application (OAuth redirect URL http://localhost, client type Confidential), then copy the Client ID and make a New Secret.",
     onDone: v => { settingsDraft[key] = v.trim(); openSettings(back); },
     onCancel: () => openSettings(back) });
@@ -103,9 +140,9 @@ async function removeTwitch() {
 }
 
 // Typing text: the on-screen keyboard on a Steam Deck, a text box on a PC.
-function askText({ title, value = "", secret = false, html = "", onDone, onCancel }) {
-  if (S.steamDeck) openKeyboard({ title, value, secret, html, onDone, onCancel });
-  else openModal({ kind: "prompt", title, secret, value, html, onSave: onDone, onCancel });
+function askText({ title, value = "", secret = false, compact = false, html = "", onDone, onCancel }) {
+  if (S.steamDeck) openKeyboard({ title, value, secret, compact, html, onDone, onCancel });
+  else openModal({ kind: "prompt", title, secret, compact, value, html, onSave: onDone, onCancel });
 }
 
 // Menu → Steam match: pick the right Steam page for a game (or none). Results come from

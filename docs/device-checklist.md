@@ -37,6 +37,8 @@ Close Heroic completely first.
 - [ ] Heroic didn't pop up in front of the app at any point.
 
 ## Matching
+- [ ] First run (move `~/.local/share/heroic-ratings/cache.json` aside first, put it back after): ratings start appearing within seconds, installed games first; the bar finishes after *Fetching Metascores*.
+- [ ] **Menu → Settings… → Steam Web API key** (Desktop Mode): copy the key from the web page, **Paste** (RB) puts it in, **Show** (View) reveals it; **Save and check with Steam** accepts it, **Test Steam key** says it works.
 - [ ] **Menu → Steam match for "…"** on an unmatched game: search finds candidates; typing a Steam app ID (e.g. `269270`) finds *LOVE*.
 - [ ] **Menu → Match unmatched games (N)** runs and the progress bar shows it.
 - [ ] *Shadow Tactics: Blades of the Shogun* appears once.

@@ -42,11 +42,11 @@ class FakeSteam:
     """Stands in for heroic_ratings.Steam: store search, GetItems and the tag list."""
     def __init__(self):
         self.calls = []
+        self.search_names = {"alpha": (100, "Alpha Quest", 85), "bravo": (200, "Bravo Racer", None)}
 
     def search(self, term):
         self.calls.append(("search", term))
-        names = {"alpha": (100, "Alpha Quest", 85), "bravo": (200, "Bravo Racer", None)}
-        for key, (appid, name, meta) in names.items():
+        for key, (appid, name, meta) in self.search_names.items():
             if key in term.lower():
                 return [{"id": appid, "name": name, "type": "app", "metascore": str(meta or "")}]
         return []
@@ -68,8 +68,16 @@ class FakeSteam:
 
 
 class FakeWikidata:
-    def __init__(self):
+    def __init__(self, epic: dict | None = None):
         self.calls = []
+        self.epic = epic or {}          # Epic store slug -> Steam app IDs
+
+    def steam_ids_by_epic(self, slugs):
+        self.calls.append(("epic", tuple(sorted(slugs))))
+        return {s: set(self.epic[s]) for s in slugs if s in self.epic}
+
+    def lookup_many(self, titles, progress=None):
+        return {t: self.lookup(t) for t in titles}
 
     def lookup(self, title):
         self.calls.append(title)

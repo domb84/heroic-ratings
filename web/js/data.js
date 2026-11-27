@@ -114,6 +114,7 @@ let toastTimer;
 function toast(msg, ms = 2500) {
   const t = $("toast");
   t.textContent = msg;
+  t.classList.toggle("top", S.modal?.kind === "keyboard");   // don't cover the keyboard's bottom row
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), ms);

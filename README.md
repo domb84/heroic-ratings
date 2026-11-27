@@ -55,7 +55,20 @@ mkdir -p ~/.local/share/heroic-ratings && cp data/*.json ~/.local/share/heroic-r
 
 If `runtime/` is missing, `launch.sh` falls back to the old behaviour: the system Python plus a full-screen browser window (Chromium, Chrome, Brave, Edge or Firefox).
 
-The first run matches every title on Steam. That takes about 3–5 minutes for 500 games, and ratings appear as they arrive. Results are cached in `data/cache.json`. Later starts are instant, and scores refresh weekly.
+The first run matches every title to Steam. Ratings start appearing within seconds (installed games first), and a 500-game library is done in about 3 minutes. Results are cached in `data/cache.json`. Later starts are instant, and scores refresh weekly.
+
+How a title is matched, fastest first:
+
+1. **By store ID.** Heroic knows each Epic game's store page and each GOG game's product ID. Wikidata (and IGDB, with a Twitch key) link many of these to their Steam page, and the app looks them all up in a few requests. These matches are exact, so they also get the right edition: the *Death Stranding* you own on Epic, not the *Director's Cut*. Earlier title matches are rechecked this way monthly.
+2. **With a Steam Web API key** (optional): the app downloads Steam's list of games weekly and matches titles locally.
+3. **Steam's store search**, three titles at a time. Ratings are fetched as matches come in, not after all of them.
+4. **Wikidata**, in a couple of requests, for what Steam's search doesn't find.
+
+Metascores come with Steam's search results, so games matched another way get theirs in a last, background pass.
+
+## Steam Web API key (optional)
+
+With a key, titles are matched against Steam's full list of games instead of searched one at a time. That's faster still, especially for large libraries. Get one free at <https://steamcommunity.com/dev/apikey>: sign in, enter any domain name (e.g. `localhost`), agree, and copy the key. Then enter it in **Menu → Settings… → Steam Web API key**. It's checked with Steam before it's saved, and **Test Steam key** checks it again later. The key is stored in `steam_key.json` in the data folder, readable only by you, and never shown or logged. `HEROIC_RATINGS_STEAM_KEY` works too.
 
 ## Add it to Game Mode
 
@@ -84,7 +97,9 @@ Run `./setup.sh` before adding the shortcut. When you choose **Quit** in the app
 
 **Desktop Mode:** Steam's Desktop controller layout turns the buttons into keys, and the app maps them: A = Enter, View = Tab, Y = Space, LB / RB = Ctrl / Alt. But B and Menu both send Escape (the app treats it as Menu), and X opens Steam's on-screen keyboard, which takes focus away from the app. For full controller support, **hold the Menu (three lines) button for a second** to switch Steam to its Gamepad layout, or launch the app through Steam as a Non-Steam Game. On a Deck in Desktop Mode, the app shows a warning bar about this until it sees a real gamepad button. 
 
-To search, press **Y** (or Menu → Search…). On a Steam Deck this opens the app's own on-screen keyboard, because Steam's keyboard (Steam + X) is unreliable for non-Steam apps: D-pad to move, **A** types, **X** deletes, **Y** adds a space, **LB** toggles capitals, **Menu** finishes, **B** cancels. The results update as you type. The settings fields use the same keyboard; a physical keyboard also types into it. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y` (search), `g` or Backspace (genres), `[` `]`, `v` (trailer sound), and `/` for search. Mouse and touch also work.
+To search, press **Y** (or Menu → Search…). On a Steam Deck this opens the app's own on-screen keyboard, because Steam's keyboard (Steam + X) is unreliable for non-Steam apps: D-pad to move, **A** types, **X** deletes, **Y** adds a space, **LB** toggles capitals, **RB** pastes, **Menu** finishes, **B** cancels. The results update as you type. The settings fields use the same keyboard; a physical keyboard also types into it.
+
+**Pasting keys and secrets:** the Twitch and Steam keys are long, so paste them instead of typing. Copy the key, then press **Paste** (or **RB**, or Ctrl+V) in the field. Spaces and line breaks that come with a copied key are removed. Secret fields show dots; **Show** (or the **View** button) reveals what you've entered, and **Hide** masks it again. On a PC the text box has the same **Paste** and **Show** buttons. Tip: the clipboard doesn't carry over between Desktop Mode and Game Mode, so the easiest way is to open the app once in Desktop Mode, copy each key from the web page, and paste it there. The keys are saved and Game Mode uses them too. On a keyboard, use the arrow keys, Enter (A), Backspace (B), Esc or `m` (Menu), Tab or `r` (reverse), `x`, `y` (search), `g` or Backspace (genres), `[` `]`, `v` (trailer sound), and `/` for search. Mouse and touch also work.
 
 ## IGDB (optional, with a Twitch key)
 

@@ -226,6 +226,15 @@ class Heroic2(HeroicAdapter):
                     ids.add(f"nile:{g['id']}")
         return ids
 
+    def store_ids(self, runner: str, entry: dict) -> dict:
+        if runner == "legendary":
+            m = re.search(r"/(?:product|p)/([a-z0-9][a-z0-9-]*)", str(entry.get("store_url") or
+                                                                    (entry.get("extra") or {}).get("storeUrl") or ""))
+            return {"epic": m.group(1)} if m else {}
+        if runner == "gog" and str(entry.get("app_name", "")).isdigit():
+            return {"gog": str(entry["app_name"])}
+        return {}
+
     # -- launch URLs
     def launch_url(self, runner: str, app_name: str, show_gui: bool) -> str:
         params = {"appName": app_name, "runner": runner}

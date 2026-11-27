@@ -52,7 +52,7 @@ class SteamClient(unittest.TestCase):
     def test_backs_off_and_honours_retry_after(self):
         r, sleeps = self.run_get([http_error(429, "7"), http_error(503), {"ok": True}])
         self.assertEqual(r, {"ok": True})
-        self.assertEqual(sleeps, [8, 10])   # Retry-After + 1, then 5 * 2^1
+        self.assertEqual([round(s) for s in sleeps], [8, 10])   # Retry-After + 1, then 5 * 2^1
 
     def test_network_errors_are_retried(self):
         r, sleeps = self.run_get([urllib.error.URLError("dns"), {"ok": 1}])
@@ -82,22 +82,59 @@ class WikidataClient(unittest.TestCase):
         ]},
         "labels": {"en": {"value": "Football Manager 2024"}}, "aliases": {}}
 
-    def test_lookup_finds_steam_page_and_scores(self):
-        wd = wikidata.Wikidata()
+    def fake(self, wd, names=None, searches=None, sparql_fails=False):
+        """Wikidata with canned answers: exact names and server-side searches through the
+        query service; item details (and the fallback search) through the API."""
+        log = {"sparql": [], "api_search": []}
+        def sparql(url, params, timeout=60, form=None):
+            q = form["query"]
+            log["sparql"].append(q)
+            if sparql_fails:
+                raise RuntimeError("query service down")
+            if "mwapi" in q:
+                rows = [{"term": {"value": t}, "item": {"value": "http://www.wikidata.org/entity/" + qid},
+                         "label": {"value": "Football Manager 2024"}}          # the item's own name
+                        for t, qid in (searches or {}).items() if f'"{t}"' in q]
+            else:
+                rows = [{"item": {"value": "http://www.wikidata.org/entity/" + qid}, "name": {"value": n}}
+                        for n, qid in (names or {}).items() if f'"{n}"@en' in q]
+            return {"results": {"bindings": rows}}
         def get(url, params, timeout=20):
             if params["action"] == "wbsearchentities":
-                return {"search": [{"id": "Q1", "label": "Football Manager 2024"}]}
+                log["api_search"].append(params["search"])
+                qid = (searches or {}).get(params["search"])
+                return {"search": [{"id": qid, "label": "Football Manager 2024"}] if qid else []}
             return {"entities": {"Q1": self.ENTITY}}
-        wd.http.get = get
+        wd.query_http.get, wd.http.get = sparql, get
+        return log
+
+    def test_lookup_finds_steam_page_and_scores(self):
+        wd = wikidata.Wikidata()
+        log = self.fake(wd, searches={"Football Manager 2024": "Q1"})
         r = wd.lookup("Football Manager 2024")
         self.assertEqual((r["qid"], r["steam"], r["metacritic"]), ("Q1", 1234, 80))
         self.assertEqual(r["critic"], {"score": 83, "by": "OpenCritic", "n": 33})
+        self.assertEqual(log["api_search"], [], "searched through the query service")
+
+    def test_exact_names_and_searches_need_two_queries_for_many_titles(self):
+        wd = wikidata.Wikidata()
+        log = self.fake(wd, names={"Football Manager 2024": "Q1"}, searches={"FM 24": "Q1"})
+        r = wd.lookup_many(["Football Manager 2024", "Nothing Like It", "Other Game"])
+        self.assertEqual(r["Football Manager 2024"]["steam"], 1234)
+        self.assertIsNone(r["Nothing Like It"])
+        self.assertIn('"Football Manager 2024"@en', log["sparql"][0])
+        self.assertEqual(len(log["sparql"]), 2, "one exact-name query, one search query (the shortened titles are the same)")
+        self.assertNotIn('"Football Manager 2024"', log["sparql"][1], "found by name: not searched")
+
+    def test_falls_back_to_the_search_api(self):
+        wd = wikidata.Wikidata()
+        log = self.fake(wd, searches={"Football Manager 2024": "Q1"}, sparql_fails=True)
+        self.assertEqual(wd.lookup("Football Manager 2024")["qid"], "Q1")
+        self.assertEqual(log["api_search"], ["Football Manager 2024"])
 
     def test_lookup_rejects_other_games(self):
         wd = wikidata.Wikidata()
-        wd.http.get = lambda url, params, timeout=20: (
-            {"search": [{"id": "Q1", "label": "Football Manager 2024"}]} if params["action"] == "wbsearchentities"
-            else {"entities": {"Q1": self.ENTITY}})
+        self.fake(wd, searches={"Space Trader 3000": "Q1"})
         self.assertIsNone(wd.lookup("Space Trader 3000"))
 
 

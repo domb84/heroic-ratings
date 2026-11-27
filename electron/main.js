@@ -3,7 +3,7 @@
 //
 //   runtime/electron/electron --no-sandbox electron [--windowed]
 "use strict";
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, clipboard } = require("electron");
 const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -156,6 +156,14 @@ async function createWindow() {
   // (its install dialog) are visible. Fullscreen comes back when the player returns.
   let steppedAside = false;
   log("window ready:", base, WINDOWED ? "windowed" : "fullscreen", `Electron ${process.versions.electron}`);
+  // Paste (keys and secrets are long): the clipboard's text, only for this app's own page,
+  // only when it asks (the Paste key), and never logged.
+  ipcMain.removeHandler("read-clipboard");
+  ipcMain.handle("read-clipboard", async e => {
+    if (e.sender !== win.webContents) return "";
+    const text = await clipboard.readText();     // (newer Electron versions answer with a promise)
+    return String(text || "").slice(0, 4096);
+  });
   ipcMain.on("step-aside", e => {
     if (e.sender !== win.webContents || win.isMinimized()) return;
     const wasFull = win.isFullScreen();

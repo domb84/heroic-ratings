@@ -67,6 +67,29 @@ class IGDB:
             ext = self.query("external_games", f"fields game,uid; where uid = ({uids}) & category = 1; limit 500;")
         return {int(r["uid"]): r["game"] for r in ext if str(r.get("uid", "")).isdigit() and r.get("game")}
 
+    EPIC_SOURCE, GOG_SOURCE = 26, 5
+    EPIC_URL = "https://store.epicgames.com/en-US/p/"
+
+    def games_by_store(self, epic_slugs: list[str], gog_ids: list[str]) -> dict[tuple[str, str], int]:
+        """{("epic", slug) | ("gog", product ID): IGDB game ID}, from IGDB's store links, in
+        bulk. (IGDB keeps Epic games under an internal ID, but with the store page's address.)"""
+        out: dict[tuple[str, str], int] = {}
+        epic = sorted({s for s in epic_slugs if s})
+        for i in range(0, len(epic), 200):
+            urls = ",".join(json.dumps(self.EPIC_URL + s) for s in epic[i:i + 200])
+            for r in self.query("external_games", f"fields url,game; where {self.source_field} = {self.EPIC_SOURCE} "
+                                                  f"& url = ({urls}); limit 500;"):
+                if r.get("game") and str(r.get("url", "")).startswith(self.EPIC_URL):
+                    out[("epic", r["url"][len(self.EPIC_URL):])] = r["game"]
+        gog = sorted({g for g in gog_ids if str(g).isdigit()})
+        for i in range(0, len(gog), 400):
+            uids = ",".join(f'"{g}"' for g in gog[i:i + 400])
+            for r in self.query("external_games", f"fields uid,game; where {self.source_field} = {self.GOG_SOURCE} "
+                                                  f"& uid = ({uids}); limit 500;"):
+                if r.get("game"):
+                    out[("gog", str(r["uid"]))] = r["game"]
+        return out
+
     def igdb_to_steam(self, game_ids: list[int]) -> dict[int, int]:
         """{IGDB game ID: Steam app ID} for games IGDB knows a Steam page of."""
         if not game_ids:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import config as cfg
@@ -11,15 +12,19 @@ from . import heroic as heroic_ctl
 from . import igdb as igdb_api
 from . import library
 from . import matching
+from . import steam_apps
 from . import ops
 from . import steam as steam_api
 from . import updates
 from . import util
 from . import wikidata
 from .config import APP_VERSION, DESKTOP_LAYOUT, GENRE_SET, IGDB_GENRES, IGDB_MIN_CRITICS, IGDB_MIN_USERS, IGDB_MISS_RETRY_SECS, IGDB_REFRESH_SECS, NOMATCH_RETRY_SECS, STEAM_DECK, STEAM_REFRESH_SECS, TAGLIST_REFRESH_SECS
-
 from .logs import log, log_error
 from .matching import EXTRA_RE
+
+SEARCH_WORKERS = 3           # Steam store searches at once (they share one back-off on "slow down")
+REVIEW_BLOCK = 40            # while searching, fetch ratings after every this many matches
+EXACT_RECHECK_SECS = 30 * 86400
 
 
 # ------------------------------------------------------------------- app state
@@ -28,7 +33,7 @@ class State:
     def __init__(self, heroic_dir: str | None):
         self.heroic_arg = heroic_dir
         self.lock = threading.RLock()
-        self.steam = steam_api.Steam()
+        self.steam = steam_api.Steam(min_interval=0.15)   # searches run 3 at a time; a "slow down" pauses them all
         self.wikidata = wikidata.Wikidata()
         self.cache = util.read_json(cfg.CACHE_FILE, {}) or {}
         self.cache.setdefault("matches", {})
@@ -134,7 +139,7 @@ class State:
         ov = self.overrides()
         matches = self.cache["matches"]
 
-        # 1. title -> Steam appid
+        # 1. title -> Steam appid. Installed games first, so they get ratings soonest.
         todo = []
         for g in self.games:
             m = matches.get(g["id"])
@@ -151,22 +156,52 @@ class State:
             if (not m or m.get("title") != g["title"]
                     or (m.get("appid") is None and now - m.get("t", 0) > NOMATCH_RETRY_SECS)):
                 todo.append(g)
-        for i, g in enumerate(todo):
-            self.set_progress("matching", i, len(todo), g["title"])
-            try:
-                appid, name, score, meta = matching.best_match(self.steam, g["title"])
-            except Exception as e:  # network down etc.: keep what we have
-                log("match failed:", g["title"], e)
-                self.set_progress("error", i, len(todo), f"Steam unreachable: {e}")
-                self.save()
-                return
-            matches[g["id"]] = {"title": g["title"], "appid": appid, "name": name,
-                                "score": round(score, 3), "metascore": meta, "t": now}
-            if i % 20 == 19:
-                self.save()
-        self.save()
+        todo.sort(key=lambda g: not g["installed"])
 
-        # 1b. not found by Steam search: try Wikidata (delisted Steam games, critic scores)
+        # 1a. exact: the game's store ID (Epic store page, GOG product ID) looked up in bulk on
+        # Wikidata and IGDB. Also re-checks earlier title matches monthly (fixes wrong editions).
+        self.set_progress("matching", 0, len(todo), "Looking up store IDs")
+        recheck = now - self.cache.get("exact_t", 0) > EXACT_RECHECK_SECS
+        exact = self.exact_matches(todo if not recheck else
+                                   [g for g in self.games if g["id"] not in ov and not g.get("steam_appid")])
+        for g in [g for g in self.games if g["id"] in exact]:
+            appid, via = exact[g["id"]]
+            m = matches.get(g["id"]) or {}
+            if m.get("appid") == appid:
+                continue
+            if m.get("appid") and m.get("via") not in (None, "applist"):
+                continue                  # matched another way on purpose (Wikidata/IGDB by name)
+            if m.get("appid"):
+                log(f"corrected match: {g['title']} {m['appid']} -> {appid} (by {via})")
+            matches[g["id"]] = {"title": g["title"], "appid": appid, "name": "", "score": 1.0,
+                                "metascore": None, "via": via, "t": now}
+        if recheck:
+            self.cache["exact_t"] = now
+        todo = [g for g in todo if g["id"] not in exact]
+
+        # 1b. with a Steam Web API key: Steam's full app list, matched locally by name
+        apps = steam_apps.app_list(self.steam, now) if todo else None
+        if apps:
+            index = steam_apps.AppIndex(apps)
+            left = []
+            for g in todo:
+                hit = index.match(g["title"])
+                if hit:
+                    matches[g["id"]] = {"title": g["title"], "appid": hit[0], "name": hit[1], "score": round(hit[2], 3),
+                                        "metascore": None, "via": "applist", "t": now}
+                else:
+                    left.append(g)
+            log(f"Steam app list matched {len(todo) - len(left)} of {len(todo)} titles")
+            todo = left
+        self.save()
+        if not self.fetch_reviews(now):          # ratings for everything matched so far
+            return
+
+        # 1c. the rest: Steam's store search, a few at a time; ratings appear as they're found
+        if not self.search_matches(todo, now):
+            return
+
+        # 1d. not found by Steam search: try Wikidata (delisted Steam games, critic scores)
         wd_todo = [g for g in self.games
                    if (m := matches.get(g["id"])) and not m.get("appid") and not m.get("override")
                    and not EXTRA_RE.search(g["title"])
@@ -176,26 +211,27 @@ class State:
         # game was matched)
         wd_todo += [g for g in self.games if (m := matches.get(g["id"])) and not m.get("override")
                     and m.get("critic") and "n" not in m["critic"] and g not in wd_todo]
-        for i, g in enumerate(wd_todo):
-            self.set_progress("wikidata", i, len(wd_todo), g["title"])
+        if wd_todo:
             try:
-                r = self.wikidata.lookup(g["title"])
+                found = self.wikidata.lookup_many(
+                    [g["title"] for g in wd_todo],
+                    progress=lambda i, n, t: self.set_progress("wikidata", i, n, t))
             except Exception as e:  # optional source: skip it for now, retry next sync
-                log("Wikidata lookup failed:", g["title"], e)
-                break
-            m = matches[g["id"]]
-            m["wd_t"] = now
-            if r:
-                m.update({"wd": r["qid"], "wd_name": r["name"], "critic": r["critic"]})
-                if r["steam"]:
-                    m.update({"appid": r["steam"], "name": r["name"], "score": r["sim"], "via": "wikidata"})
-                if r["metacritic"] and not m.get("metascore"):
-                    m["metascore"] = r["metacritic"]
-            if i % 10 == 9:
-                self.save()
-        self.save()
+                log("Wikidata lookup failed:", e)
+                found = None
+            for g in wd_todo if found is not None else []:
+                r = found.get(g["title"])
+                m = matches[g["id"]]
+                m["wd_t"] = now
+                if r:
+                    m.update({"wd": r["qid"], "wd_name": r["name"], "critic": r["critic"]})
+                    if r["steam"] and not m.get("appid"):
+                        m.update({"appid": r["steam"], "name": r["name"], "score": r["sim"], "via": "wikidata"})
+                    if r["metacritic"] and not m.get("metascore"):
+                        m["metascore"] = r["metacritic"]
+            self.save()
 
-        # 1c. IGDB (with a Twitch key): find each game there; a game Steam search missed
+        # 1e. IGDB (with a Twitch key): find each game there; a game Steam search missed
         # gets its Steam page from IGDB when IGDB knows it (also via alternative names).
         self.sync_igdb_map(now)
 
@@ -207,22 +243,98 @@ class State:
             except Exception as e:
                 log("tag list failed:", e)
 
-        # 3. reviews/tags per appid, batched
-        sdata = self.cache["steam"]
-        appids = sorted({m["appid"] for g in self.games
-                         if (m := matches.get(g["id"])) and m.get("appid")})
-        stale = [a for a in appids if str(a) not in sdata
-                 or now - sdata[str(a)].get("t", 0) > STEAM_REFRESH_SECS]
+        # 3. reviews/tags for anything not fetched yet (and weekly refreshes)
+        if not self.fetch_reviews(now):
+            return
+
+        # 4. IGDB details: scores, play styles, series, similar games, lengths, covers…
+        self.sync_igdb_details(now)
+
+        # 5. Metascores: they come with Steam's search results, so games matched another way
+        # (store ID, app list) get one search each, last, while the list is already usable.
+        self.backfill_metascores(now)
+        self.set_progress("done", len(self.games), len(self.games))
+
+    # -- matching helpers
+    def exact_matches(self, games: list[dict]) -> dict[str, tuple[int, str]]:
+        """{game id: (Steam app ID, "store-id")} for games whose store ID Wikidata or IGDB
+        links to exactly one Steam app."""
+        epic = {g["id"]: g["store_ids"]["epic"] for g in games if (g.get("store_ids") or {}).get("epic")}
+        gog = {g["id"]: g["store_ids"]["gog"] for g in games if (g.get("store_ids") or {}).get("gog")}
+        if not epic and not gog:
+            return {}
+        cands: dict[str, set[int]] = {}
+        try:
+            wd = self.wikidata.steam_ids_by_epic(list(epic.values()))
+            for gid, slug in epic.items():
+                cands.setdefault(gid, set()).update(wd.get(slug, ()))
+        except Exception as e:      # optional: title search covers these
+            log("Wikidata store-ID lookup failed:", e)
+        creds = igdb_api.twitch_credentials()
+        if creds:
+            try:
+                ig = igdb_api.IGDB(*creds)
+                games_ = ig.games_by_store(list(epic.values()), list(gog.values()))
+                steam = {}
+                ids = sorted(set(games_.values()))
+                for i in range(0, len(ids), 400):
+                    steam.update(ig.igdb_to_steam(ids[i:i + 400]))
+                for gid, key in [(g, ("epic", s)) for g, s in epic.items()] + [(g, ("gog", s)) for g, s in gog.items()]:
+                    if games_.get(key) in steam:
+                        cands.setdefault(gid, set()).add(steam[games_[key]])
+            except Exception as e:
+                log("IGDB store-ID lookup failed:", e)
+        out = {gid: (next(iter(c)), "store-id") for gid, c in cands.items() if len(c) == 1}
+        log(f"store IDs: {len(out)} exact Steam matches for {len(games)} games "
+            f"({sum(1 for c in cands.values() if len(c) > 1)} ambiguous, left to the title search)")
+        return out
+
+    def search_matches(self, todo: list[dict], now: float) -> bool:
+        """Steam store search for each title, SEARCH_WORKERS at a time. Ratings for each block
+        of new matches are fetched straight away. False if Steam was unreachable."""
+        matches = self.cache["matches"]
+        done = 0
+        with ThreadPoolExecutor(SEARCH_WORKERS) as pool:
+            futures = {pool.submit(matching.best_match, self.steam, g["title"]): g for g in todo}
+            try:
+                for fut in as_completed(futures):
+                    g = futures[fut]
+                    appid, name, score, meta = fut.result()
+                    matches[g["id"]] = {"title": g["title"], "appid": appid, "name": name,
+                                        "score": round(score, 3), "metascore": meta, "t": now}
+                    done += 1
+                    self.set_progress("matching", done, len(todo), g["title"])
+                    if done % REVIEW_BLOCK == 0:
+                        self.save()
+                        self.fetch_reviews(now, quiet=True)
+            except Exception as e:  # network down etc.: keep what we have
+                for f in futures:
+                    f.cancel()
+                log("match failed:", futures[fut]["title"], e)
+                self.set_progress("error", done, len(todo), f"Steam unreachable: {e}")
+                self.save()
+                return False
+        self.save()
+        return True
+
+    def fetch_reviews(self, now: float, quiet: bool = False) -> bool:
+        """Steam reviews/tags for matched games not fetched yet (or due their weekly refresh),
+        100 per request. False if Steam was unreachable."""
+        matches, sdata = self.cache["matches"], self.cache["steam"]
+        appids = sorted({m["appid"] for g in self.games if (m := matches.get(g["id"])) and m.get("appid")})
+        stale = [a for a in appids if str(a) not in sdata or now - sdata[str(a)].get("t", 0) > STEAM_REFRESH_SECS]
         for i in range(0, len(stale), 100):
             batch = stale[i:i + 100]
-            self.set_progress("ratings", i, len(stale), "Fetching Steam reviews")
+            if not quiet:
+                self.set_progress("ratings", i, len(stale), "Fetching Steam reviews")
             try:
                 items = self.steam.items(batch)
             except Exception as e:
                 log("GetItems failed:", e)
-                self.set_progress("error", i, len(stale), f"Steam unreachable: {e}")
+                if not quiet:
+                    self.set_progress("error", i, len(stale), f"Steam unreachable: {e}")
                 self.save()
-                return
+                return False
             for it in items:
                 aid = it.get("appid") or it.get("id")
                 if not aid:
@@ -246,12 +358,48 @@ class State:
             for a in batch:  # remember appids Steam returned nothing for
                 sdata.setdefault(str(a), {"t": now, "ok": False})
             self.save()
+        if stale:
+            with self.lock:
+                self.version += 1    # the list shows the new ratings
+        return True
+
+    def backfill_metascores(self, now: float):
+        """One Steam search (by the Steam name) for each game matched without searching, to
+        pick up its Metascore. Retried monthly for games Steam has none for."""
+        matches, sdata = self.cache["matches"], self.cache["steam"]
+        todo = [m for g in self.games if (m := matches.get(g["id"])) and m.get("appid") and not m.get("metascore")
+                and m.get("via") in ("store-id", "applist", "heroic") and now - m.get("ms_t", 0) > NOMATCH_RETRY_SECS
+                and (sdata.get(str(m["appid"])) or {}).get("ok")]
+        if not todo:
+            return
+
+        def one(m):
+            name = sdata[str(m["appid"])].get("name") or m["title"]
+            for item in self.steam.search(name):
+                if item.get("id") == m["appid"]:
+                    ms = item.get("metascore")
+                    return int(ms) if str(ms or "").isdigit() and int(ms) > 0 else None
+            return None
+        done = 0
+        with ThreadPoolExecutor(SEARCH_WORKERS) as pool:
+            futures = {pool.submit(one, m): m for m in todo}
+            for fut in as_completed(futures):
+                m = futures[fut]
+                done += 1
+                self.set_progress("metascores", done, len(todo), m["title"])
+                try:
+                    ms = fut.result()
+                except Exception as e:
+                    log("Metascore lookup failed:", m["title"], e)
+                    continue
+                m["ms_t"] = now
+                if ms:
+                    m["metascore"] = ms
+                if done % 50 == 0:
+                    self.save()
+        self.save()
         with self.lock:
             self.version += 1
-
-        # 4. IGDB details: scores, play styles, series, similar games, lengths, covers…
-        self.sync_igdb_details(now)
-        self.set_progress("done", len(self.games), len(self.games))
 
     def sync_igdb_map(self, now: float):
         creds = igdb_api.twitch_credentials()

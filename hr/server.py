@@ -23,6 +23,7 @@ from . import health
 from . import heroic as heroic_ctl
 from . import igdb as igdb_api
 from . import steam as steam_api
+from . import steam_apps
 from . import util
 from .config import APP_VERSION
 from .logs import log, log_error
@@ -200,7 +201,8 @@ def make_handler(state: State, on_quit, token: str | None = None):
                 return self._json({"ok": True})
             if path == "/api/settings":
                 return self._json({"ok": True, "twitch": igdb_api.twitch_settings(), "version": APP_VERSION,
-                                   "updates": state.updates.view(), "heroic": heroic_ctl.compatibility()})
+                                   "updates": state.updates.view(), "heroic": heroic_ctl.compatibility(),
+                                   "steam_key": steam_apps.key_settings()})
             if path == "/api/update-install":
                 return self._json(state.updates.start_install())
             if path == "/api/settings/updates":
@@ -209,6 +211,15 @@ def make_handler(state: State, on_quit, token: str | None = None):
                 if on:
                     threading.Thread(target=state.updates.check, daemon=True).start()
                 return self._json({"ok": True, "updates": state.updates.view()})
+            if path == "/api/settings/steam-key":
+                r = steam_apps.remove_key() if body.get("remove") else steam_apps.save_key(str(body.get("key", "")))
+                if r["ok"] and not body.get("remove"):
+                    state.wake.set()          # match the rest of the library with the app list now
+                return self._json(r)
+            if path == "/api/settings/steam-key-test":
+                r = steam_apps.test_key()
+                log("Steam key test:", "ok" if r["ok"] else r["error"])
+                return self._json(r)
             if path == "/api/settings/twitch-test":
                 r = igdb_api.test_twitch_credentials()
                 log("IGDB key test:", "ok" if r["ok"] else r["error"])

@@ -173,6 +173,7 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
   background: var(--panel2); border: 1px solid var(--line); padding: 0.6rem 1.2rem; border-radius: 0.5rem;
   font-size: 0.95rem; z-index: 20; box-shadow: 0 0.5rem 1.5rem #000a;
 }
+#toast.top { top: 1.2rem; bottom: auto; }
 #toast[hidden] { display: none; }
 
 /* Steam Deck View / Menu button glyphs */
@@ -296,6 +297,11 @@ footer > span { display: flex; align-items: center; gap: 0.35rem; }
 .modal.prompt #promptInput { width: 100%; margin: .6rem 0; padding: .55rem .7rem; font-size: 1.05rem; border-radius: .4rem;
                              border: 1px solid var(--accent); background: var(--panel2); color: var(--text); }
 .modal.prompt .hint { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+.modal.prompt .prompt-acts { display: flex; gap: .5rem; margin-bottom: .6rem; }
+.modal.prompt .prompt-acts button { font: inherit; font-size: .9rem; padding: .35rem .9rem; border-radius: .4rem; cursor: pointer;
+  background: var(--panel2); color: inherit; border: 1px solid var(--line); }
+.modal.prompt .prompt-acts button:hover { border-color: var(--accent); }
+.modal.keyboard .kbfield.revealed { font-family: ui-monospace, monospace; letter-spacing: .02em; word-break: break-all; }
 .modal.prompt .hint > span { display: inline-flex; align-items: center; gap: .3rem; }
 
 /* on-screen keyboard */

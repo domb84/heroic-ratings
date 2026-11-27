@@ -19,8 +19,9 @@ function renderModal() {
   if (m.kind === "prompt") {   // one text field (PC: type with the keyboard)
     els.modal.innerHTML = `<h3>${esc(m.title)}</h3>
       <div class="q">${m.html || ""}</div>
-      <input id="promptInput" type="${m.secret ? "password" : "text"}" autocomplete="off" spellcheck="false" value="${esc(m.value || "")}">
-      <div class="hint"><span>Enter OK</span><span>Esc Cancel</span></div>`;
+      <input id="promptInput" type="${m.secret && !m.reveal ? "password" : "text"}" autocomplete="off" spellcheck="false" value="${esc(m.value || "")}">
+      <div class="prompt-acts"><button type="button" data-act="paste">Paste</button>${m.secret ? `<button type="button" data-act="reveal">${m.reveal ? "Hide" : "Show"}</button>` : ""}</div>
+      <div class="hint"><span>Enter OK</span><span>Esc Cancel</span><span>Ctrl+V or RB paste</span>${m.secret ? `<span>View ${m.reveal ? "hide" : "show"}</span>` : ""}</div>`;
     const inp = document.getElementById("promptInput");
     setTimeout(() => { inp.focus(); inp.select(); }, 0);
     return;
@@ -52,6 +53,8 @@ function modalInput(a) {
   if (m.kind === "prompt") {
     if (a === "a") { const v = document.getElementById("promptInput").value; closeModal(); m.onSave(v); }
     else if (a === "b" || a === "start") { closeModal(); m.onCancel?.(); }
+    else if (a === "rb") promptAction(m, "paste");
+    else if (a === "select") promptAction(m, "reveal");
     return;
   }
 

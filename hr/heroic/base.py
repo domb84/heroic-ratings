@@ -54,6 +54,10 @@ class HeroicAdapter:
         (otherwise the user is asked to do it in Heroic itself)."""
         return True
 
+    def store_ids(self, runner: str, entry: dict) -> dict:
+        """IDs other databases know the game by: {"epic": store page slug} / {"gog": product ID}."""
+        return {}
+
     def steam_appid(self, runner: str, app_name: str) -> int | None:
         """The Steam app ID when the game *is* a Steam game (no title matching needed; it's
         launched through Steam directly rather than through a Heroic-made shortcut)."""

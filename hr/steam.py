@@ -28,17 +28,20 @@ class Steam:
         self.min_interval = min_interval
         self.name = name
         self._last = 0.0
+        self._paused_until = 0.0     # after a "slow down" reply, every caller waits (searches run in parallel)
         self._lock = threading.Lock()
 
-    def get(self, url: str, params: dict, timeout=20):
-        full = url + "?" + urllib.parse.urlencode(params)
+    def get(self, url: str, params: dict, timeout=20, form: dict | None = None):
+        """GET url?params (or POST form, when given), retried with back-off; returns the JSON."""
+        full = url + "?" + urllib.parse.urlencode(params) if params else url
+        body = urllib.parse.urlencode(form).encode() if form is not None else None
         for attempt in range(6):
             with self._lock:
-                wait = self._last + self.min_interval - time.monotonic()
+                wait = max(self._last + self.min_interval, self._paused_until) - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
                 self._last = time.monotonic()
-            req = urllib.request.Request(full, headers={"User-Agent": UA, "Accept": "application/json"})
+            req = urllib.request.Request(full, data=body, headers={"User-Agent": UA, "Accept": "application/json"})
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     return json.loads(r.read().decode("utf-8"))
@@ -50,7 +53,8 @@ class Steam:
                     if ra.isdigit():  # the server says exactly how long to wait
                         delay = min(120, int(ra) + 1)
                     log(f"{self.name} HTTP {e.code}, backing off {delay}s")
-                    time.sleep(delay)
+                    with self._lock:   # everyone waits, this caller too (at the top of the loop)
+                        self._paused_until = max(self._paused_until, time.monotonic() + delay)
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError, socket.timeout, ValueError) as e:

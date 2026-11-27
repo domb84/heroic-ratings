@@ -27,9 +27,11 @@ document.addEventListener("keydown", e => {
   }
   if (S.modal?.kind === "keyboard") {   // a physical keyboard types into the on-screen one too
     const m = S.modal;
-    if (e.key.length === 1 && !e.ctrlKey && !e.altKey) { e.preventDefault(); m.value += e.key; m.onChange?.(m.value); renderModal(); return; }
+    if (e.key.length === 1 && !e.ctrlKey && !e.altKey) { e.preventDefault(); m.typed = true; m.value += e.key; m.onChange?.(m.value); renderModal(); return; }
     if (e.key === "Backspace") { e.preventDefault(); kbPress(m, "⌫ Delete"); return; }
-    if (e.key === "Enter") { e.preventDefault(); kbPress(m, "✓ Done"); return; }
+    // Enter is Done after typing on a real keyboard. Otherwise it presses the highlighted
+    // key: Steam's Desktop layout sends Enter for A, so A must type there too.
+    if (e.key === "Enter") { e.preventDefault(); kbPress(m, m.typed ? "✓ Done" : kbKey(m)); return; }
     if (e.key === "Escape") { e.preventDefault(); kbInput(m, "b"); return; }
   }
   if (document.activeElement?.id === "promptInput") {

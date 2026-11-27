@@ -175,6 +175,88 @@ class Interface(unittest.TestCase):
         self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
         self.ev("settingsDraft.client_secret = ''; closeModal()")
 
+    def clipboard(self, text):
+        """What the app window's clipboard bridge hands back on Paste."""
+        self.ev(f"window.shell = {{ ...(window.shell || {{}}), readClipboard: async () => {json.dumps(text)} }}")
+
+    def test_paste_and_reveal_a_key_on_the_deck_keyboard(self):
+        self.ev("S.steamDeck = true; settingsDraft.client_secret = ''; openSettings()")
+        self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+        self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Twitch client secret'); input('a')")
+        self.assertEqual(self.ev("S.modal.kind"), "keyboard")
+        self.assertIn("Paste", self.ev("kbRows(S.modal).at(-1)"))
+        self.assertIn("Show", self.ev("kbRows(S.modal).at(-1)"), "a secret can be shown")
+        self.clipboard("  s3cr3t KEY\n0123 \n")
+        self.ev("input('rb')")                                   # RB: paste
+        self.page.wait_for_function("S.modal.value === 's3cr3tKEY0123'")   # spaces and line breaks dropped
+        self.assertEqual(self.ev("document.querySelector('.kbfield').textContent"), "•" * 13)
+        self.ev("input('select')")                               # View: show it
+        self.assertEqual(self.ev("document.querySelector('.kbfield').textContent"), "s3cr3tKEY0123")
+        self.assertIn("Hide", self.ev("kbRows(S.modal).at(-1)"))
+        self.ev("input('select')")
+        self.assertNotIn("s3cr3t", self.ev("document.querySelector('.kbfield').textContent"))
+        self.ev("input('start')")                                # done: back in settings with the draft
+        self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+        self.assertEqual(self.ev("settingsDraft.client_secret"), "s3cr3tKEY0123")
+        self.ev("settingsDraft.client_secret = ''; closeModal(); S.steamDeck = false")
+
+    def test_deck_keyboard_with_steams_desktop_layout(self):
+        """Steam's Desktop layout sends keys: D-pad = arrows, A = Enter, RB = Alt."""
+        self.ev("S.steamDeck = true; settingsDraft.client_secret = ''; openSettings()")
+        self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+        self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Twitch client secret'); input('a')")
+        kb = self.page.keyboard
+        for k in ["ArrowDown"] * 4 + ["ArrowRight"] * 3:             # to the bottom row's Paste key
+            kb.press(k)
+        self.assertEqual(self.ev("kbKey(S.modal)"), "Paste")
+        self.clipboard("KEY123\n")
+        kb.press("Enter")                                            # A: presses Paste, doesn't close
+        self.page.wait_for_function("S.modal && S.modal.value === 'KEY123'")
+        self.assertEqual(self.ev("S.modal.kind"), "keyboard")
+        self.clipboard("456")
+        kb.press("Alt")                                              # RB: paste
+        self.page.wait_for_function("S.modal.value === 'KEY123456'")
+        kb.press("ArrowRight")                                       # Show
+        kb.press("Enter")
+        self.assertEqual(self.ev("document.querySelector('.kbfield').textContent"), "KEY123456")
+        kb.press("ArrowRight")                                       # Done
+        kb.press("Enter")
+        self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+        self.assertEqual(self.ev("settingsDraft.client_secret"), "KEY123456")
+        self.ev("settingsDraft.client_secret = ''; closeModal(); S.steamDeck = false")
+
+    def test_paste_into_the_search_keyboard_keeps_spaces_and_empty_clipboard_says_so(self):
+        self.ev("S.steamDeck = true; input('y')")
+        self.clipboard("  Bravo \n Racer ")
+        self.ev("input('rb')")
+        self.page.wait_for_function("S.modal.value === 'Bravo Racer'")
+        self.assertEqual(self.ev("S.query"), "Bravo Racer", "the list filters as with typing")
+        self.assertNotIn("Show", self.ev("kbRows(S.modal).at(-1)"), "nothing to hide in a search")
+        self.clipboard("")
+        self.ev("input('rb')")
+        self.page.wait_for_function("$('toast').textContent.startsWith('Nothing to paste')")
+        self.ev("input('b'); S.steamDeck = false")
+
+    def test_paste_and_reveal_in_the_pc_text_box(self):
+        self.ev("S.steamDeck = false; settingsDraft.steam_key = ''; openSettings()")
+        self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+        self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Steam Web API key'); input('a')")
+        self.assertEqual(self.ev("S.modal.kind"), "prompt")
+        self.assertEqual(self.ev("$('promptInput').type"), "password")
+        self.clipboard("0123456789ABCDEF 0123456789ABCDEF\n")
+        self.page.click("[data-act=paste]")
+        self.page.wait_for_function("$('promptInput').value === '0123456789ABCDEF0123456789ABCDEF'")
+        self.page.click("[data-act=reveal]")
+        self.assertEqual(self.ev("$('promptInput').type"), "text")
+        self.assertEqual(self.ev("$('promptInput').value"), "0123456789ABCDEF0123456789ABCDEF", "showing keeps what was entered")
+        self.ev("input('select')")
+        self.assertEqual(self.ev("$('promptInput').type"), "password")
+        # Ctrl+V: a paste event, tidied the same way, replacing the selection
+        self.ev("""(() => { const i = $('promptInput'); i.select(); const dt = new DataTransfer(); dt.setData('text', ' NEW key '); 
+                   i.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); })()""")
+        self.assertEqual(self.ev("$('promptInput').value"), "NEWkey")
+        self.ev("input('b'); settingsDraft.steam_key = ''; S.modal && closeModal()")
+
     def test_pick_a_steam_match_for_an_unmatched_game(self):
         saved = json.loads(json.dumps(self.state.cache["matches"]["legendary:gamma"]))
         self.addCleanup(lambda: self.state.cache["matches"].__setitem__("legendary:gamma", saved))
@@ -366,6 +448,37 @@ class Interface(unittest.TestCase):
         self.ev("input('b')")
         self.page.wait_for_function("S.modal && S.modal.title === 'Menu'")
         self.ev("closeModal()")
+
+    def test_settings_steam_key_section(self):
+        import os
+        from unittest import mock
+        key_file = cfg.DATA_DIR / "steam_key.json"
+        with mock.patch.dict(os.environ, {"HEROIC_RATINGS_STEAM_KEY": ""}):
+            key_file.unlink(missing_ok=True)
+            self.ev("S.steamDeck = false; openSettings()")
+            self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+            items = self.ev("S.modal.items().map(i => (i.heading ? '# ' : '') + i.label + (i.value ? ' = ' + i.value : ''))")
+            self.assertIn("# Steam", items)
+            self.assertIn("Steam Web API key = Not set", items)
+            self.assertTrue(any("steamcommunity.com/dev/apikey" in i for i in items), "says where to get one")
+            self.assertNotIn("Test Steam key", items)
+            self.assertNotEqual(self.ev("S.modal.items()[S.modal.sel].heading"), True, "cursor isn't on a heading")
+            self.ev("closeModal()")
+            key_file.write_text(json.dumps({"key": "0123456789ABCDEF0123456789ABCDEF"}))
+            try:
+                self.ev("openSettings()")
+                self.page.wait_for_function("S.modal && S.modal.title === 'Settings'")
+                items = self.ev("S.modal.items().map(i => i.label + (i.value ? ' = ' + i.value : ''))")
+                self.assertIn("Steam Web API key = 0123…CDEF", items)
+                self.assertIn("Remove Steam key", items)
+                self.assertNotIn("0123456789ABCDEF0123456789ABCDEF", self.page.content())
+                self.page.route("**/api/settings/steam-key-test", lambda route: route.fulfill(json={"ok": True}))
+                self.ev("S.modal.sel = S.modal.items().findIndex(i => i.label === 'Test Steam key'); input('a')")
+                self.page.wait_for_function("$('toast').textContent === 'The Steam key is working'")
+                self.page.unroute("**/api/settings/steam-key-test")
+                self.ev("closeModal()")
+            finally:
+                key_file.unlink(missing_ok=True)
 
     def test_igdb_test_button_reports_the_result(self):
         answers = iter([{"ok": True}, {"ok": False, "error": "Twitch didn't accept the client ID and secret (HTTP 400)."}])

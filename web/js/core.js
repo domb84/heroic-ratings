@@ -11,7 +11,7 @@ const SORTS = [
   { key: "title", label: "Title", dir: 1, get: g => g.title.toLowerCase() },
 ];
 const STORES = ["All", "Epic", "GOG", "Amazon", "Other"];
-const PHASE_TEXT = { starting: "Reading Heroic library…", matching: "Matching titles on Steam", wikidata: "Looking up the rest on Wikidata", ratings: "Fetching Steam reviews", igdb: "IGDB" };
+const PHASE_TEXT = { starting: "Reading Heroic library…", matching: "Matching titles on Steam", wikidata: "Looking up the rest on Wikidata", ratings: "Fetching Steam reviews", igdb: "IGDB", metascores: "Fetching Metascores" };
 // IGDB play styles (game modes) and perspectives, for the filters. Only with an IGDB (Twitch) key.
 const STYLES = { "Any": null, "Single player": "Single player", "Co-op": "Co-operative", "Split screen": "Split screen",
                  "Multiplayer": "Multiplayer", "MMO": "Massively Multiplayer Online (MMO)", "Battle royale": "Battle Royale" };
