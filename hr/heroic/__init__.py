@@ -361,15 +361,26 @@ def check_api(heroic_dir: Path | None) -> dict | None:
     return None
 
 
-def _window(heroic_dir: Path | None, js: str, timeout: float, what: str) -> dict:
-    """heroic_eval, after checking this Heroic is one the adapter can drive."""
+def _window(heroic_dir: Path | None, js: str, timeout: float, what: str, runner: str = "") -> dict:
+    """heroic_eval, after checking this Heroic (and this store) is one the adapter can drive."""
+    if runner and not adapter().manages(runner):
+        store = adapter().store_labels.get(runner, runner)
+        return {"error": "heroic-store-unmanaged", "detail": f"{store} games are installed and uninstalled in Heroic itself for now"}
     err = check_api(heroic_dir)
     return err or heroic_eval(heroic_dir, js, timeout, what)
 
 
 def launch_game(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
     """Launch a game through its own Steam shortcut, so it runs as its own Steam app and
-    not inside ours. Refuses (with the reason) when Steam can't launch it yet."""
+    not inside ours. Refuses (with the reason) when Steam can't launch it yet. A game that
+    is a Steam game (Heroic 3's Steam store) is launched through Steam directly."""
+    appid = adapter().steam_appid(runner, app_name)
+    if appid:
+        stopped = stop_our_heroic(heroic_dir)
+        if "error" in stopped:
+            return stopped
+        steam_api.steam_run(appid)
+        return {"via": "steam-app"}
     status = steam_api.game_shortcut_status(runner, app_name)
     if status != "ready":
         return {"error": {"missing": "no-shortcut", "restart": "restart-steam"}.get(status, status)}
@@ -413,7 +424,8 @@ def install_locations(default_path: str | None) -> list[dict]:
 
 
 def install_options(runner: str, app_name: str, platform: str, heroic_dir: Path | None) -> dict:
-    r = _window(heroic_dir, adapter().install_options_js(runner, app_name, platform or "Windows"), 100, "install options")
+    r = _window(heroic_dir, adapter().install_options_js(runner, app_name, platform or "Windows"), 100, "install options",
+                runner)
     if "error" in r:
         return r
     opts = r["value"]
@@ -436,7 +448,7 @@ def install_with_options(runner: str, app_name: str, o: dict, heroic_dir: Path |
               "language": o.get("language") if isinstance(o.get("language"), str) else "",
               "wine": o.get("wine") if isinstance(o.get("wine"), str) and platform == "Windows" else None,
               "sharedPrefix": o.get("sharedPrefix") is True}
-    r = _window(heroic_dir, adapter().install_js(runner, app_name, choice), 60, "install")
+    r = _window(heroic_dir, adapter().install_js(runner, app_name, choice), 60, "install", runner)
     if "error" in r:
         return r
     log("install:", app_name, platform, path, "->", r["value"])
@@ -444,7 +456,7 @@ def install_with_options(runner: str, app_name: str, o: dict, heroic_dir: Path |
 
 
 def uninstall_options(runner: str, app_name: str, heroic_dir: Path | None) -> dict:
-    r = _window(heroic_dir, adapter().uninstall_options_js(runner, app_name), 60, "uninstall options")
+    r = _window(heroic_dir, adapter().uninstall_options_js(runner, app_name), 60, "uninstall options", runner)
     if "error" in r:
         return r
     o = r["value"]
@@ -453,7 +465,8 @@ def uninstall_options(runner: str, app_name: str, heroic_dir: Path | None) -> di
 
 def start_uninstall(runner: str, app_name: str, remove_prefix: bool, remove_settings: bool,
                     heroic_dir: Path | None) -> dict:
-    r = _window(heroic_dir, adapter().uninstall_js(runner, app_name, remove_prefix, remove_settings), 15, "uninstall")
+    r = _window(heroic_dir, adapter().uninstall_js(runner, app_name, remove_prefix, remove_settings), 15, "uninstall",
+                runner)
     if "error" in r:
         return r
     log("uninstall:", app_name, "prefix" if remove_prefix else "", "settings" if remove_settings else "", "->", r["value"])

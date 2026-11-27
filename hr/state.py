@@ -38,7 +38,6 @@ class State:
         self.heroic: Path | None = None
         self.progress = {"phase": "starting", "done": 0, "total": 0, "message": ""}
         self.wake = threading.Event()
-        self.force = False
         self.version = 0  # bumps when data changes so the UI can refresh
         self.busy_until = 0.0  # Heroic downloading/uninstalling: the health log samples more often
         self.ops = ops.OpQueue(run=self._run_op, status=lambda: heroic_ctl.heroic_downloads(self.heroic), is_installed=self._installed_now,
@@ -132,7 +131,6 @@ class State:
             self.set_progress("error", message="Heroic config folder not found. Use --heroic-dir.")
             return
         now = time.time()
-        force, self.force = self.force, False
         ov = self.overrides()
         matches = self.cache["matches"]
 
@@ -140,12 +138,17 @@ class State:
         todo = []
         for g in self.games:
             m = matches.get(g["id"])
+            if g.get("steam_appid") and g["id"] not in ov:     # it *is* a Steam game: nothing to search for
+                if not m or m.get("appid") != g["steam_appid"]:
+                    matches[g["id"]] = {"title": g["title"], "appid": g["steam_appid"], "name": g["title"],
+                                        "score": 1.0, "metascore": None, "via": "heroic", "t": now}
+                continue
             if g["id"] in ov:
                 if not m or m.get("appid") != ov[g["id"]] or not m.get("override"):
                     matches[g["id"]] = {"title": g["title"], "appid": ov[g["id"]], "name": "",
                                         "score": 1.0, "metascore": None, "override": True, "t": now}
                 continue
-            if (force or not m or m.get("title") != g["title"]
+            if (not m or m.get("title") != g["title"]
                     or (m.get("appid") is None and now - m.get("t", 0) > NOMATCH_RETRY_SECS)):
                 todo.append(g)
         for i, g in enumerate(todo):
@@ -167,7 +170,7 @@ class State:
         wd_todo = [g for g in self.games
                    if (m := matches.get(g["id"])) and not m.get("appid") and not m.get("override")
                    and not EXTRA_RE.search(g["title"])
-                   and (force or now - m.get("wd_t", 0) > NOMATCH_RETRY_SECS
+                   and (now - m.get("wd_t", 0) > NOMATCH_RETRY_SECS
                         or (m.get("critic") and "n" not in m["critic"]))]
         # (critic scores saved before review counts were kept are re-checked once, however the
         # game was matched)
@@ -194,10 +197,10 @@ class State:
 
         # 1c. IGDB (with a Twitch key): find each game there; a game Steam search missed
         # gets its Steam page from IGDB when IGDB knows it (also via alternative names).
-        self.sync_igdb_map(now, force)
+        self.sync_igdb_map(now)
 
         # 2. tag names
-        if force or not self.cache["tags"] or now - self.cache.get("tags_t", 0) > TAGLIST_REFRESH_SECS:
+        if not self.cache["tags"] or now - self.cache.get("tags_t", 0) > TAGLIST_REFRESH_SECS:
             try:
                 self.cache["tags"] = self.steam.tag_names()
                 self.cache["tags_t"] = now
@@ -208,7 +211,7 @@ class State:
         sdata = self.cache["steam"]
         appids = sorted({m["appid"] for g in self.games
                          if (m := matches.get(g["id"])) and m.get("appid")})
-        stale = [a for a in appids if force or str(a) not in sdata
+        stale = [a for a in appids if str(a) not in sdata
                  or now - sdata[str(a)].get("t", 0) > STEAM_REFRESH_SECS]
         for i in range(0, len(stale), 100):
             batch = stale[i:i + 100]
@@ -247,10 +250,10 @@ class State:
             self.version += 1
 
         # 4. IGDB details: scores, play styles, series, similar games, lengths, covers…
-        self.sync_igdb_details(now, force)
+        self.sync_igdb_details(now)
         self.set_progress("done", len(self.games), len(self.games))
 
-    def sync_igdb_map(self, now: float, force: bool):
+    def sync_igdb_map(self, now: float):
         creds = igdb_api.twitch_credentials()
         if not creds:
             return
@@ -260,7 +263,7 @@ class State:
 
         def stale(g):
             e, m = imap.get(g["id"]), matches.get(g["id"]) or {}
-            if force or not e or e.get("appid") != m.get("appid"):
+            if not e or e.get("appid") != m.get("appid"):
                 return True
             return now - e.get("t", 0) > (IGDB_MISS_RETRY_SECS if not e.get("id") else IGDB_REFRESH_SECS)
 
@@ -297,13 +300,13 @@ class State:
             log("IGDB matching failed:", repr(e))
         self.save()
 
-    def sync_igdb_details(self, now: float, force: bool):
+    def sync_igdb_details(self, now: float):
         creds = igdb_api.twitch_credentials()
         if not creds:
             return
         imap, details = self.cache.get("igdb_map", {}), self.cache.setdefault("igdb", {})
         ids = sorted({e["id"] for e in imap.values() if e.get("id")})
-        stale = [i for i in ids if force or str(i) not in details
+        stale = [i for i in ids if str(i) not in details
                  or now - details[str(i)].get("t", 0) > IGDB_REFRESH_SECS]
         if not stale:
             return

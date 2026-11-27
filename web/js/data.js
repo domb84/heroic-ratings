@@ -65,7 +65,7 @@ async function poll() {
 // The installed Heroic is one this version can't drive (yet): say so up front, rather
 // than letting an install fail halfway.
 function heroicStatusText(h) {
-  return { ok: "supported", untested: "newer than tested", unknown: "version unknown",
+  return { ok: "supported", preliminary: "preliminary support", untested: "newer than tested", unknown: "version unknown",
            unsupported: "not supported yet", "api-changed": "installing off" }[h.status] || h.status;
 }
 function showHeroicWarn(h) {

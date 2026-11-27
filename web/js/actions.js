@@ -34,6 +34,11 @@ function launchSelected() {
   const g = S.view[S.sel];
   if (!g) return;
   if (S.downloads[g.id]?.queued || S.downloads[g.id]?.starting) { toast(`${g.title} is already in the queue`, 3000); return; }
+  if (!g.installed && g.managed === false) {   // e.g. Heroic 3's Steam and itch.io games
+    openModal({ kind: "confirm", yes: "OK", onYes: () => {},
+      html: `<b>${esc(g.title)}</b> isn't installed.<div class="note">Install ${esc(g.store)} games in Heroic itself for now; this app can't install them yet.</div>` });
+    return;
+  }
   if (!g.installed) {
     openModal({
       kind: "confirm", yes: "Install",
@@ -307,6 +312,7 @@ function heroicProblem(code, what, extra, g, extraInfo = {}) {
       <div class="note">Do it in Heroic itself for now, or update Heroic Ratings once a version that supports it is out.</div>`,
     "heroic-api-changed": `Heroic has changed in a way this app doesn't expect, so it won't ${what} (rather than risk a half-done job).
       <div class="note">Do it in Heroic itself for now. (${esc(extraInfo.detail || "")})</div>`,
+    "heroic-store-unmanaged": `${esc(extraInfo.detail || "These games are installed in Heroic itself for now")}, so this app can't ${what}.`,
     "heroic-not-stopped": `The Heroic this app runs in the background didn't close, so ${title} wasn't launched. Try again.`,
   }[code];
   openModal({ kind: "confirm", yes: "OK", onYes: () => {},

@@ -43,3 +43,9 @@ Close Heroic completely first.
 
 ## Stability
 - [ ] Install a large game (or two in the queue) and keep using the app. If the Deck freezes, after the hard reset copy `~/.local/share/heroic-ratings/logs/` and run the journal command from the freeze investigation; the last lines of `health.log` show what was filling up.
+
+## Heroic 3 (preliminary support, only with Heroic 3 installed)
+- [ ] **Menu → About…** shows *Heroic 3.x.x · preliminary support* and there's no warning bar.
+- [ ] Epic / GOG games: install, uninstall and launch work as with Heroic 2.
+- [ ] Steam games (logged into Steam in Heroic) are listed with their Steam ratings and no **Steam match** row; **Launch** starts the game through Steam.
+- [ ] Installing a Steam or itch.io game says to do it in Heroic itself.

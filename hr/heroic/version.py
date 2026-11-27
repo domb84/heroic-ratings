@@ -15,9 +15,10 @@ from pathlib import Path
 from ..config import HEROIC_FLATPAK_ID, HOME
 from .base import HeroicAdapter
 from .v2 import Heroic2
+from .v3 import Heroic3
 
 # newest first; the first one whose majors include the installed version is used
-ADAPTERS: list[type[HeroicAdapter]] = [Heroic2]
+ADAPTERS: list[type[HeroicAdapter]] = [Heroic3, Heroic2]
 
 
 def asar_candidates() -> list[Path]:
@@ -69,14 +70,18 @@ def parse(v: str | None) -> tuple[int, ...] | None:
 def pick(version: str | None) -> tuple[HeroicAdapter, str]:
     """(adapter, status). status:
       "ok"          written for this version
+      "preliminary" written for this version from Heroic's source, not yet tried on a device
       "untested"    same major version, newer than the adapter was checked against
-      "unknown"     Heroic's version couldn't be read: assume the newest adapter
+      "unknown"     Heroic's version couldn't be read: assume the stable (non-preliminary) adapter
       "unsupported" no adapter for this major version (the newest is used to read the
                     library; installing and uninstalling are off)"""
     v = parse(version)
-    if v is None:
-        return ADAPTERS[0](), "unknown"
+    if v is None:          # can't tell: the adapter for the Heroic most people have (the stable one)
+        return next(c for c in ADAPTERS if not c.preliminary)(), "unknown"
     for cls in ADAPTERS:
         if v[0] in cls.majors:
-            return cls(), "ok" if v <= parse(cls.tested) else "untested"
-    return ADAPTERS[0](), "unsupported"
+            if v > parse(cls.tested):
+                return cls(), "untested"
+            return cls(), "preliminary" if cls.preliminary else "ok"
+    # unknown major version: the newest adapter for a newer Heroic, the oldest for an older one
+    return (ADAPTERS[0]() if v[0] > max(ADAPTERS[0].majors) else ADAPTERS[-1]()), "unsupported"

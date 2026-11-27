@@ -123,9 +123,9 @@ function openMenu() {
     hint: `<span>◀ ▶ change</span><span><span class="btn a">A</span>Select</span><span><span class="btn b">B</span>Close</span>`,
     items: () => {
       const game = g ? [
-        ...(!g.extra ? [{ label: `Steam match for “${g.title}”…`, value: g.appid ? (g.override ? "set by you" : "app " + g.appid) : "none",
+        ...(!g.extra && !g.steam_appid ? [{ label: `Steam match for “${g.title}”…`, value: g.appid ? (g.override ? "set by you" : "app " + g.appid) : "none",
                           activate: () => matchFlow(g, g.title) }] : []),
-        ...(g.installed && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
+        ...(g.installed && g.managed !== false && !S.downloads[g.id] ? [{ label: `Uninstall “${g.title}”`, activate: () => { closeModal(); uninstallFlow(g); } }] : []),
         ...(S.downloads[g.id]?.queued ? [{ label: `Cancel queued ${S.downloads[g.id].kind} of “${g.title}”`, activate: () => cancelQueued(g) }] : []),
       ] : [];
       return [

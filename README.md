@@ -165,7 +165,13 @@ Heroic does the uninstall; the game's row shows "Uninstalling…" until it's don
 
 Everything that depends on Heroic's version lives in an *adapter* in [`hr/heroic/`](hr/heroic/): which files hold the library, the format of Heroic's launch links (used to find each game's Steam shortcut), and the functions in Heroic's window that installing, uninstalling and progress use. The rest of the app only sees the plain shapes described in [`hr/heroic/base.py`](hr/heroic/base.py).
 
-At start-up the app reads the installed Heroic's version from its `app.asar` (without starting Heroic) and picks the adapter for it. Supported now: **Heroic 2.x** (tested with 2.22.4).
+At start-up the app reads the installed Heroic's version from its `app.asar` (without starting Heroic) and picks the adapter for it. Supported now:
+
+- **Heroic 2.x**, tested with 2.22.4.
+- **Heroic 3.x, preliminary.** It was written from the 3.0.0-beta.1 source and hasn't been tried on a device yet; About shows *preliminary support*. Everything this app uses is unchanged from 2.x, so Epic, GOG, Amazon and sideloaded games work the same way. Heroic 3's new stores:
+  - **Steam** games appear with their Steam ratings straight away (Heroic gives their Steam app ID, so no matching is needed). **Launch** starts them through Steam itself.
+  - **itch.io** games are listed and launch through their Steam shortcut, like other games.
+  - Installing and uninstalling **Steam and itch.io** games stays in Heroic for now. The app says so instead of offering it.
 
 - **Menu → About…** shows the Heroic version and whether it's supported.
 - **A Heroic version with no adapter yet** (for example the coming Heroic 3.0): a bar under the header says so. Browsing, ratings and launching games through Steam still work (the 2.x adapter reads the library as best it can); installing and uninstalling are turned off, so nothing gets half-done. `HEROIC_RATINGS_ALLOW_UNSUPPORTED=1` turns them on anyway, for trying out a new Heroic.

@@ -25,6 +25,7 @@ class HeroicAdapter:
     name = "Heroic"
     majors: tuple[int, ...] = ()          # major versions this adapter is written for
     tested = "0"                          # newest version it has been checked against
+    preliminary = False                   # written from Heroic's source, not yet checked on a device
 
     # ---------------------------------------------------------------- files
     store_labels: dict[str, str] = {}     # runner id -> store name shown in the app
@@ -46,6 +47,17 @@ class HeroicAdapter:
 
     def looks_like_config_dir(self, d: Path) -> bool:
         raise NotImplementedError
+
+    # ---------------------------------------------------------------- per store
+    def manages(self, runner: str) -> bool:
+        """Whether this app installs and uninstalls this store's games through Heroic
+        (otherwise the user is asked to do it in Heroic itself)."""
+        return True
+
+    def steam_appid(self, runner: str, app_name: str) -> int | None:
+        """The Steam app ID when the game *is* a Steam game (no title matching needed; it's
+        launched through Steam directly rather than through a Heroic-made shortcut)."""
+        return None
 
     # ---------------------------------------------------------------- launch URLs
     def launch_url(self, runner: str, app_name: str, show_gui: bool) -> str:

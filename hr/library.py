@@ -49,6 +49,8 @@ def load_library(heroic: Path) -> list[dict]:
             "installed": bool(e.get("is_installed")) or gid in installed,
             "art": e.get("art_square") or e.get("art_cover") or "",
             "art_wide": e.get("art_cover") or "",
+            "steam_appid": a.steam_appid(runner, app),       # a Steam game itself (Heroic 3)
+            "managed": a.manages(runner),                    # installs/uninstalls through this app
         }
 
     for e, runner in a.library_entries(heroic):

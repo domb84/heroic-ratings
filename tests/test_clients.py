@@ -126,13 +126,13 @@ class IgdbSync(unittest.TestCase):
                 mock.patch.object(igdb_api, "IGDB", FakeIGDB), mock.patch.object(igdb_api, "twitch_credentials", lambda: ("id", "secret")):
             st = sb.state()
             st.reload_library()
-            st.sync_igdb_map(time.time(), force=False)
+            st.sync_igdb_map(time.time())
             imap, m = st.cache["igdb_map"], st.cache["matches"]
             self.assertEqual(imap["legendary:alpha"]["id"], 1000)            # by Steam app ID
             self.assertEqual(imap["legendary:gamma"]["id"], 3)               # by name
             self.assertEqual((m["legendary:gamma"]["appid"], m["legendary:gamma"]["via"]), (300, "igdb"))
             self.assertNotIn("legendary:ued", imap, "editors aren't looked up")
-            st.sync_igdb_details(time.time(), force=False)
+            st.sync_igdb_details(time.time())
             self.assertEqual(st.cache["igdb"]["1000"]["main"], 5.0)
             self.assertEqual(set(st.cache["igdb"]), {"1000", "2000", "3"})
 
@@ -140,8 +140,8 @@ class IgdbSync(unittest.TestCase):
         with Sandbox(synced_cache()) as sb, mock.patch.object(igdb_api, "twitch_credentials", lambda: None):
             st = sb.state()
             st.reload_library()
-            st.sync_igdb_map(time.time(), force=False)
-            st.sync_igdb_details(time.time(), force=False)
+            st.sync_igdb_map(time.time())
+            st.sync_igdb_details(time.time())
             self.assertNotIn("igdb_map", st.cache)
 
 

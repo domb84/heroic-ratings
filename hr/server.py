@@ -140,7 +140,7 @@ def make_handler(state: State, on_quit, token: str | None = None):
             if not isinstance(body, dict):
                 return self._json({"error": "bad json"}, 400)
             if path not in QUIET_PATHS:   # actions, not the UI's polling
-                log("POST", path, json.dumps({k: v for k, v in body.items() if k in ("id", "force", "add", "fix", "options",
+                log("POST", path, json.dumps({k: v for k, v in body.items() if k in ("id", "add", "fix", "options",
                                                                                       "removePrefix", "removeSettings", "platform")})[:300])
             if path == "/api/log":   # errors from the UI
                 if ui_log_budget.take():
@@ -259,7 +259,6 @@ def make_handler(state: State, on_quit, token: str | None = None):
                 log(path, g["title"], "->", r)
                 return self._json({"ok": "error" not in r, **r})
             if path == "/api/refresh":
-                state.force = bool(body.get("force"))
                 state.wake.set()
                 return self._json({"ok": True})
             if path == "/api/override":

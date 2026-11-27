@@ -469,6 +469,21 @@ class Interface(unittest.TestCase):
         self.ev("input('b')")
         self.page.unroute("**/api/install-options")
 
+    def test_heroic3_steam_and_itch_games_are_left_to_heroic(self):
+        # as the backend marks them with Heroic 3: a Steam game (known app ID) and an itch.io game
+        self.ev("""(() => { const b = S.games.find(g => g.title === 'Bravo Racer'); Object.assign(b, {store: 'itch.io', managed: false});
+                    const a = S.games.find(g => g.title === 'Alpha Quest'); Object.assign(a, {store: 'Steam', managed: false, steam_appid: 100}); })()""")
+        self.ev("select(S.view.findIndex(g => g.title === 'Bravo Racer'), true); launchSelected()")
+        text = self.ev("$('modal').innerText")
+        self.assertIn("Install itch.io games in Heroic itself for now", text)
+        self.assertNotIn("Install it with Heroic?", text)
+        self.ev("closeModal(); select(S.view.findIndex(g => g.title === 'Alpha Quest'), true); input('start')")
+        labels = self.ev("S.modal.items().map(i => i.label)")
+        self.assertNotIn("Uninstall “Alpha Quest”", labels, "uninstalled in Heroic")
+        self.assertFalse(any(l.startswith("Steam match for") for l in labels), "its Steam app is already known")
+        self.ev("closeModal(); loadGames()")
+        self.page.wait_for_timeout(300)
+
     def test_page_errors_reach_the_app_log(self):
         self.ev("setTimeout(() => { throw new Error('ui test boom'); })")
         self.page.wait_for_timeout(500)

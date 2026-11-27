@@ -19,11 +19,12 @@ from unittest import mock
 from helpers import Sandbox, synced_cache, heroic_ctl, steam_api, library  # noqa: F401
 from hr.heroic import version as heroic_version  # noqa: E402
 from hr.heroic.v2 import Heroic2  # noqa: E402
+from hr.heroic.v3 import Heroic3  # noqa: E402
 from test_queue import CHROME  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # adapter class -> (stand-in window script, a version it's for)
-WINDOWS = {Heroic2: ("heroic2_window.js", "2.22.4")}
+WINDOWS = {Heroic2: ("heroic2_window.js", "2.22.4"), Heroic3: ("heroic3_window.js", "3.0.0-beta.1")}
 
 
 def make_asar(path: Path, package: dict):
@@ -48,12 +49,14 @@ class Versions(unittest.TestCase):
                 self.assertIsNone(heroic_version.detect_version([Path(d, "missing")]))
 
     def test_picks_the_adapter_and_says_how_sure_it_is(self):
-        cases = {"2.22.4": "ok", "2.18.0": "ok", "2.23.1": "untested", "3.0.0-beta.1": "unsupported",
-                 "1.10.3": "unsupported", None: "unknown", "nonsense": "unknown"}
-        for v, status in cases.items():
+        cases = {"2.22.4": ("ok", Heroic2), "2.18.0": ("ok", Heroic2), "2.23.1": ("untested", Heroic2),
+                 "3.0.0-beta.1": ("preliminary", Heroic3), "3.0.0": ("preliminary", Heroic3), "3.1.0": ("untested", Heroic3),
+                 "4.0.0": ("unsupported", Heroic3), "1.10.3": ("unsupported", Heroic2),
+                 None: ("unknown", Heroic2), "nonsense": ("unknown", Heroic2)}
+        for v, (status, cls) in cases.items():
             a, s = heroic_version.pick(v)
             self.assertEqual(s, status, v)
-            self.assertIsInstance(a, Heroic2)
+            self.assertIs(type(a), cls, v)
         self.assertEqual(heroic_version.parse("3.0.0-beta.1"), (3, 0, 0))
 
     def test_every_adapter_has_a_contract_fixture(self):
@@ -84,6 +87,27 @@ class Adapters(unittest.TestCase):
             "uninstalling": [{"appName": "b", "runner": "legendary"}]})
         self.assertEqual(Heroic2().normalise_downloads(None)["queue"], [])
 
+    def test_heroic3_reads_steam_and_itch_libraries(self):
+        with tempfile.TemporaryDirectory() as d:
+            h = Path(d)
+            (h / "store_cache").mkdir()
+            (h / "store_cache/legendary_library.json").write_text(json.dumps({"library": [{"app_name": "eel", "title": "Eel"}]}))
+            (h / "store_cache/steam_library.json").write_text(json.dumps({"games": [
+                {"app_name": "620", "title": "Portal 2", "runner": "steam", "is_installed": True}]}))
+            (h / "store_cache/itchio_library.json").write_text(json.dumps({"library": [
+                {"app_name": "itch-77", "title": "Celeste Classic", "runner": "itchio", "is_installed": False}]}))
+            with mock.patch.object(heroic_ctl, "adapter", lambda: Heroic3()):
+                games = {g["app_name"]: g for g in library.load_library(h)}
+            self.assertEqual(set(games), {"eel", "620", "itch-77"})
+            p, i, e = games["620"], games["itch-77"], games["eel"]
+            self.assertEqual((p["store"], p["installed"], p["steam_appid"], p["managed"]), ("Steam", True, 620, False))
+            self.assertEqual((i["store"], i["steam_appid"], i["managed"]), ("itch.io", None, False))
+            self.assertEqual((e["store"], e["steam_appid"], e["managed"]), ("Epic", None, True))
+            self.assertIn("store_cache/steam_library.json", Heroic3().watched_files())
+            # the 2.x adapter doesn't know these stores
+            with mock.patch.object(heroic_ctl, "adapter", lambda: Heroic2()):
+                self.assertEqual({g["app_name"] for g in library.load_library(h)}, {"eel"})
+
     def test_library_comes_through_the_adapter(self):
         with Sandbox(synced_cache()) as sb:
             games = library.load_library(sb.heroic)
@@ -92,22 +116,62 @@ class Adapters(unittest.TestCase):
             self.assertIn("legendaryConfig/legendary/installed.json", Heroic2().watched_files())
 
 
+class SteamGamesFromHeroic(unittest.TestCase):
+    def test_matched_by_app_id_without_searching(self):
+        with Sandbox(synced_cache()) as sb:
+            (sb.heroic / "store_cache/steam_library.json").write_text(json.dumps({"games": [
+                {"app_name": "100", "title": "Alpha Quest (Steam)", "runner": "steam", "is_installed": True}]}))
+            with mock.patch.dict(os.environ, {"HEROIC_RATINGS_HEROIC_VERSION": "3.0.0-beta.1"}):
+                heroic_ctl.compat(refresh=True)
+                self.addCleanup(heroic_ctl.compat, refresh=True)
+                st = sb.state()
+                st.reload_library()
+                st.sync()
+            m = st.cache["matches"]["steam:100"]
+            self.assertEqual((m["appid"], m["via"]), (100, "heroic"))
+            self.assertNotIn(("search", "Alpha Quest (Steam)"), st.steam.calls)
+            g = next(g for g in st.snapshot()["games"] if g["id"] == "steam:100")
+            self.assertEqual((g["store"], g["percent"], g["managed"]), ("Steam", 95, False))
+
+
 class Compatibility(unittest.TestCase):
     def tearDown(self):
         heroic_ctl.compat(refresh=True)      # back to the version helpers.py sets
 
     def test_unsupported_heroic_is_never_driven(self):
-        with mock.patch.dict(os.environ, {"HEROIC_RATINGS_HEROIC_VERSION": "3.0.0-beta.1"}):
+        with mock.patch.dict(os.environ, {"HEROIC_RATINGS_HEROIC_VERSION": "4.0.0"}):
             heroic_ctl.compat(refresh=True)
             c = heroic_ctl.compatibility()
-            self.assertEqual((c["version"], c["status"], c["installs"]), ("3.0.0-beta.1", "unsupported", False))
+            self.assertEqual((c["version"], c["status"], c["installs"]), ("4.0.0", "unsupported", False))
             with mock.patch.object(heroic_ctl, "heroic_eval", side_effect=AssertionError("Heroic was touched")):
                 r = heroic_ctl.install_options("legendary", "beta", "Windows", None)
                 self.assertEqual(r["error"], "heroic-unsupported")
-                self.assertIn("3.0.0-beta.1", r["detail"])
+                self.assertIn("4.0.0", r["detail"])
                 self.assertEqual(heroic_ctl.start_uninstall("legendary", "alpha", False, False, None)["error"], "heroic-unsupported")
             with mock.patch.dict(os.environ, {"HEROIC_RATINGS_ALLOW_UNSUPPORTED": "1"}):
                 self.assertTrue(heroic_ctl.installs_allowed(), "developers can still try it")
+
+    def test_heroic3_leaves_steam_and_itch_installs_to_heroic(self):
+        with mock.patch.dict(os.environ, {"HEROIC_RATINGS_HEROIC_VERSION": "3.0.0-beta.1"}):
+            heroic_ctl.compat(refresh=True)
+            c = heroic_ctl.compatibility()
+            self.assertEqual((c["status"], c["installs"], c["adapter"]), ("preliminary", True, "Heroic 3.x"))
+            with mock.patch.object(heroic_ctl, "heroic_eval", side_effect=AssertionError("Heroic was touched")):
+                for runner, store in (("steam", "Steam"), ("itchio", "itch.io")):
+                    r = heroic_ctl.install_options(runner, "620", "Windows", None)
+                    self.assertEqual(r["error"], "heroic-store-unmanaged")
+                    self.assertIn(store, r["detail"])
+                    self.assertEqual(heroic_ctl.start_uninstall(runner, "620", False, False, None)["error"], "heroic-store-unmanaged")
+
+    def test_heroic3_steam_games_launch_through_steam(self):
+        with mock.patch.dict(os.environ, {"HEROIC_RATINGS_HEROIC_VERSION": "3.0.0-beta.1"}):
+            heroic_ctl.compat(refresh=True)
+            ran = []
+            with mock.patch.object(heroic_ctl, "stop_our_heroic", lambda d: {}), \
+                    mock.patch.object(steam_api, "steam_run", ran.append), \
+                    mock.patch.object(steam_api, "game_shortcut_status", side_effect=AssertionError("no shortcut needed")):
+                self.assertEqual(heroic_ctl.launch_game("steam", "620", None), {"via": "steam-app"})
+            self.assertEqual(ran, [620])
 
     def test_a_changed_api_turns_installs_off_once_noticed(self):
         heroic_ctl.compat(refresh=True)
@@ -207,7 +271,8 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.window(p, "window.calls.filter(c => c[0] === 'uninstall').map(c => c[1])"),
                          [{"app": "alpha", "runner": "legendary", "prefix": True, "settings": False}])
         self.assertEqual(heroic_ctl.heroic_downloads(p)["uninstalling"], [{"appName": "alpha", "runner": "legendary"}])
-        self.assertEqual(heroic_ctl.compatibility()["status"], "ok")
+        c = heroic_ctl.compatibility()
+        self.assertEqual((c["installs"], c["missing"]), (True, []), "the API check passed")
 
     def test_a_window_missing_functions_is_caught(self):
         with mock.patch.dict(os.environ, {"HEROIC_RATINGS_HEROIC_VERSION": "2.22.4"}), \
